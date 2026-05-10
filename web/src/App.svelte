@@ -33,6 +33,8 @@
   let newTagColor = $state('#56c271');
   let tagIcon = $state('');
   let editingTagId = $state<number | null>(null);
+  let tagImageRef = $state<string | null>(null);
+  let uploadingImg = $state(false);
   let videoEl = $state<HTMLVideoElement>();
   let playbackRate = $state(1);
   let generalNoteText = $state('');
@@ -199,18 +201,29 @@
       } catch (e) { scanJob = null; window.alert(String(e)); }
     })();
   }
-  function startEditTag(t: Tag) { editingTagId = t.id; newTagName = t.name; newTagColor = t.color; tagIcon = t.icon ?? ''; }
-  function cancelEditTag() { editingTagId = null; newTagName = ''; tagIcon = ''; }
+  function startEditTag(t: Tag) { editingTagId = t.id; newTagName = t.name; newTagColor = t.color; tagIcon = t.icon ?? ''; tagImageRef = t.image_ref; }
+  function cancelEditTag() { editingTagId = null; newTagName = ''; tagIcon = ''; tagImageRef = null; }
+  function removeTagImage() { tagImageRef = null; }
+  async function pickTagImage(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';                                   // allow re-picking the same file
+    if (!file) return;
+    uploadingImg = true;
+    try { tagImageRef = (await api.uploadTagImage(file)).image_ref; }
+    catch (err) { window.alert(String(err)); }
+    finally { uploadingImg = false; }
+  }
   async function saveTag() {
     const name = newTagName.trim();
     if (!name) return;
     const icon = tagIcon.trim() || null;
     try {
       if (editingTagId === null) {
-        await api.createTag({ name, color: newTagColor, icon, sort_order: tags.length });
+        await api.createTag({ name, color: newTagColor, icon, image_ref: tagImageRef, sort_order: tags.length });
       } else {
         const orig = tags.find((t) => t.id === editingTagId);
-        await api.updateTag(editingTagId, { name, color: newTagColor, icon, image_ref: orig?.image_ref ?? null, description: orig?.description ?? '', sort_order: orig?.sort_order ?? 0 });
+        await api.updateTag(editingTagId, { name, color: newTagColor, icon, image_ref: tagImageRef, description: orig?.description ?? '', sort_order: orig?.sort_order ?? 0 });
       }
       cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail();
     } catch (e) { window.alert(String(e)); }
@@ -375,7 +388,7 @@
       <div class="tagcloud">
         {#each tags as t (t.id)}
           <button class="tagchip" class:on={filterTagIds.includes(t.id)} style:background={filterTagIds.includes(t.id) ? t.color : ''} onclick={() => toggleTagFilter(t.id)}>
-            {t.icon ?? ''} {t.name} <span class="n">{t.asset_count ?? 0}</span>
+            {@render tagFace(t)} {t.name} <span class="n">{t.asset_count ?? 0}</span>
           </button>
         {/each}
         {#if tags.length === 0}<span class="faint" style:font-size="12px">No tags yet — create some via “Tags”.</span>{/if}
@@ -393,8 +406,8 @@
           <button class="btn sm" onclick={selectAllVisible}>all ({assets.length})</button>
           <button class="btn sm" onclick={clearSelection}>clear</button>
           <span style:flex="1"></span>
-          <label>+ tag <select bind:value={bulkAddTag} disabled={bulkBusy} onchange={() => { if (bulkAddTag) { bulkApplyTag(Number(bulkAddTag)); bulkAddTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{t.icon ?? ''} {t.name}</option>{/each}</select></label>
-          <label>− tag <select bind:value={bulkRemoveTag} disabled={bulkBusy} onchange={() => { if (bulkRemoveTag) { bulkRemoveTagFn(Number(bulkRemoveTag)); bulkRemoveTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{t.icon ?? ''} {t.name}</option>{/each}</select></label>
+          <label>+ tag <select bind:value={bulkAddTag} disabled={bulkBusy} onchange={() => { if (bulkAddTag) { bulkApplyTag(Number(bulkAddTag)); bulkAddTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{@render tagFace(t)} {t.name}</option>{/each}</select></label>
+          <label>− tag <select bind:value={bulkRemoveTag} disabled={bulkBusy} onchange={() => { if (bulkRemoveTag) { bulkRemoveTagFn(Number(bulkRemoveTag)); bulkRemoveTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{@render tagFace(t)} {t.name}</option>{/each}</select></label>
           <button class="btn sm" disabled={bulkBusy} onclick={bulkDelete}>🗑 delete {selected.size}</button>
         </div>
       {/if}
@@ -416,7 +429,7 @@
               <div class="tags">
                 {#each a.tag_ids as id (id)}
                   {@const t = tagById.get(id)}
-                  {#if t}<span class="pill" style:background={t.color}>{t.icon ?? ''} {t.name}</span>{/if}
+                  {#if t}<span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name}</span>{/if}
                 {/each}
               </div>
             </div>
@@ -496,13 +509,13 @@
         <div class="tagcloud">
           {#each d.tag_ids as id (id)}
             {@const t = tagById.get(id)}
-            {#if t}<span class="pill" style:background={t.color}>{t.icon ?? ''} {t.name} <button class="x" onclick={() => unapplyTag(t.id)}>×</button></span>{/if}
+            {#if t}<span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name} <button class="x" onclick={() => unapplyTag(t.id)}>×</button></span>{/if}
           {/each}
           {#if d.tag_ids.length === 0}<span class="faint">no tags</span>{/if}
         </div>
         <div class="tagcloud" style:margin-top="6px">
           {#each tags.filter((t) => !d.tag_ids.includes(t.id)) as t (t.id)}
-            <button class="tagchip" onclick={() => applyTag(t.id)}>+ {t.icon ?? ''} {t.name}</button>
+            <button class="tagchip" onclick={() => applyTag(t.id)}>+ {@render tagFace(t)} {t.name}</button>
           {/each}
         </div>
         <h4>General note</h4>
@@ -518,10 +531,10 @@
           <div class="tsntags">
             {#each n.tag_ids as id (id)}
               {@const t = tagById.get(id)}
-              {#if t}<span class="pill" style:background={t.color}>{t.icon ?? ''} {t.name} <button class="x" onclick={() => removeTagFromNote(n, t.id)}>×</button></span>{/if}
+              {#if t}<span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name} <button class="x" onclick={() => removeTagFromNote(n, t.id)}>×</button></span>{/if}
             {/each}
             {#each tags.filter((t) => !n.tag_ids.includes(t.id)) as t (t.id)}
-              <button class="tagchip ntag" onclick={() => addTagToNote(n, t.id)}>+ {t.icon ?? ''} {t.name}</button>
+              <button class="tagchip ntag" onclick={() => addTagToNote(n, t.id)}>+ {@render tagFace(t)} {t.name}</button>
             {/each}
           </div>
         {/each}
@@ -553,6 +566,7 @@
   </div>
 {/if}
 
+{#snippet tagFace(t: Tag)}{#if t.image_ref}<img class="tagimg" src="/api/tag-images/{t.image_ref}" alt="" />{:else if t.icon}{t.icon}{/if}{/snippet}
 {#if showTags}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) { showTags = false; cancelEditTag(); } }}>
@@ -560,16 +574,18 @@
       <div class="mtop"><h3>Tags</h3><span style:flex="1"></span><button class="btn sm" onclick={() => { showTags = false; cancelEditTag(); }}>Close</button></div>
       <div class="mbody">
         {#each tags as t (t.id)}
-          <div class="trow" class:editing={editingTagId === t.id}><span class="sw" style:background={t.color}></span> <b>{t.icon ?? ''} {t.name}</b> <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => startEditTag(t)} title="edit">✎</button><button class="x" onclick={() => deleteTag(t.id)} title="delete">🗑</button></div>
+          <div class="trow" class:editing={editingTagId === t.id}><span class="sw" style:background={t.color}></span> <b>{@render tagFace(t)} {t.name}</b> <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => startEditTag(t)} title="edit">✎</button><button class="x" onclick={() => deleteTag(t.id)} title="delete">🗑</button></div>
         {/each}
         <div class="trow" style:margin-top="8px">
-          <input class="field" style:max-width="150px" placeholder={editingTagId === null ? 'new tag name' : 'name'} bind:value={newTagName} />
+          <input class="field" style:max-width="146px" placeholder={editingTagId === null ? 'new tag name' : 'name'} bind:value={newTagName} />
           <input type="color" bind:value={newTagColor} title="colour" />
-          <input class="field" style:max-width="60px" placeholder="icon" maxlength="8" bind:value={tagIcon} title="an emoji shown before the name" />
+          <input class="field" style:max-width="54px" placeholder="icon" maxlength="8" bind:value={tagIcon} disabled={tagImageRef !== null} title="an emoji shown before the name" />
+          <label class="btn sm" title="upload an image to use as the icon (a copy is kept by the app)">{uploadingImg ? '…' : '📷'}<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onchange={pickTagImage} style:display="none" /></label>
+          {#if tagImageRef}<img class="tagimg tagimg-prev" src="/api/tag-images/{tagImageRef}" alt="" /><button class="x" onclick={removeTagImage} title="remove the image">×</button>{/if}
           <button class="btn sm primary" onclick={saveTag}>{editingTagId === null ? '+ Create' : '💾 Save'}</button>
           {#if editingTagId !== null}<button class="btn sm" onclick={cancelEditTag}>Cancel</button>{/if}
         </div>
-        <p class="faint" style:margin-top="10px" style:font-size="12px">Tags are flat and yours: name + colour + an optional emoji icon. Click ✎ to rename / recolour / re-icon a tag; 🗑 deletes it everywhere. (Uploading a custom image as the icon is a planned addition.)</p>
+        <p class="faint" style:margin-top="10px" style:font-size="12px">Tags are flat and yours: name + colour + either an emoji or an uploaded image as the icon. Click ✎ to edit a tag; 🗑 deletes it everywhere. Uploaded images are copied into the app's data folder, so deleting the original file is fine.</p>
       </div>
     </div>
   </div>
@@ -648,6 +664,8 @@
   .trow { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
   .trow .sw { width: 16px; height: 16px; border-radius: 4px; border: 2px solid rgba(255,255,255,.13); flex: none; }
   .trow.editing { background: var(--accent-soft); border-radius: 6px; padding-left: 6px; }
+  .tagimg { width: 14px; height: 14px; object-fit: cover; border-radius: 3px; vertical-align: -2px; display: inline-block; }
+  .tagimg-prev { width: 26px; height: 26px; }
   .btn:disabled { opacity: .5; cursor: default; }
   .timeline { position: relative; height: 16px; background: var(--bg-2); border-radius: 5px; cursor: pointer; flex: none; overflow: hidden; }
   .timeline .sel { position: absolute; top: 0; bottom: 0; background: rgba(255,106,43,.22); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }

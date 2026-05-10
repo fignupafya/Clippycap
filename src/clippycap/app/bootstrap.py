@@ -164,7 +164,7 @@ def build_application(
 
     return Application(
         config=config, database=database, event_bus=event_bus, registries=registries, jobs=jobs,
-        assets=AssetService(database, event_bus, thumbnail_dir), tags=TagService(database, event_bus),
+        assets=AssetService(database, event_bus, thumbnail_dir), tags=TagService(database, event_bus, tag_images_dir),
         notes=NoteService(database, event_bus), references=ReferenceService(database, event_bus),
         reference_types=ReferenceTypeService(database), sources=SourceService(database, event_bus),
         saved_views=SavedViewService(database), scans=ScanService(database, scanner, jobs, event_bus),

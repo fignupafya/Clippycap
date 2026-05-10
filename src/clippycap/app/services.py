@@ -10,6 +10,7 @@ are in their own modules.)
 from __future__ import annotations
 
 import contextlib
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -200,10 +201,16 @@ class AssetService:
 # --------------------------------------------------------------------------- tags
 
 
+_TAG_IMAGE_EXTS = {"png", "jpg", "jpeg", "webp", "gif"}
+_TAG_IMAGE_CONTENT_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+_MAX_TAG_IMAGE_BYTES = 4 * 1024 * 1024
+
+
 class TagService:
-    def __init__(self, database: Database, event_bus: EventBus) -> None:
+    def __init__(self, database: Database, event_bus: EventBus, tag_images_dir: Path | None = None) -> None:
         self._db = database
         self._bus = event_bus
+        self._images_dir = tag_images_dir
 
     def list_all(self) -> list[Tag]:
         with self._db.transaction() as uow:
@@ -235,17 +242,54 @@ class TagService:
     ) -> Tag:
         with self._db.transaction() as uow:
             tag = _require(uow.tags.get(tag_id), "tag", tag_id)
+            old_ref = tag.image_ref
             tag.name, tag.color, tag.icon = name, color, icon
             tag.image_ref, tag.description, tag.sort_order = image_ref, description, sort_order
             uow.tags.update(tag)
+        if old_ref != image_ref:
+            self._prune_image(old_ref)
         self._bus.publish(TagUpdated(tag_id=tag_id))
         return tag
 
     def delete(self, tag_id: int) -> None:
         with self._db.transaction() as uow:
-            _require(uow.tags.get(tag_id), "tag", tag_id)
+            tag = _require(uow.tags.get(tag_id), "tag", tag_id)
+            old_ref = tag.image_ref
             uow.tags.delete(tag_id)
+        self._prune_image(old_ref)
         self._bus.publish(TagDeleted(tag_id=tag_id))
+
+    def store_image(self, data: bytes, *, ext: str = "", content_type: str = "") -> str:
+        """Persist an uploaded image under the data dir and return its (stable) reference name."""
+        images_dir = self._images_dir
+        if images_dir is None:
+            raise UnsupportedError("tag-image storage is unavailable")
+        chosen = ext.lower().lstrip(".")
+        if chosen not in _TAG_IMAGE_EXTS:
+            chosen = _TAG_IMAGE_CONTENT_TYPES.get(content_type.split(";", maxsplit=1)[0].strip().lower(), "")
+        if not chosen:
+            raise InvalidInputError("the image must be a PNG, JPEG, WEBP or GIF")
+        if not data:
+            raise InvalidInputError("the uploaded image is empty")
+        if len(data) > _MAX_TAG_IMAGE_BYTES:
+            raise InvalidInputError("the image is too large (4 MiB max)")
+        images_dir.mkdir(parents=True, exist_ok=True)
+        name = f"{uuid.uuid4().hex}.{'jpg' if chosen == 'jpeg' else chosen}"
+        (images_dir / name).write_bytes(data)
+        return name
+
+    def _prune_image(self, image_ref: str | None) -> None:
+        """Delete an uploaded tag image once no tag references it (keeps the data dir tidy)."""
+        images_dir = self._images_dir
+        if not image_ref or images_dir is None:
+            return
+        with self._db.transaction() as uow:
+            if any(t.image_ref == image_ref for t in uow.tags.list_all()):
+                return
+        candidate = images_dir / image_ref
+        if candidate.parent == images_dir and candidate.is_file():
+            with contextlib.suppress(OSError):
+                candidate.unlink()
 
     def reorder(self, ordered_ids: Sequence[int]) -> None:
         with self._db.transaction() as uow:
