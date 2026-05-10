@@ -448,6 +448,28 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         app.tags.reorder(body.ids)
         return Response(status_code=204)
 
+    @api.post("/api/tag-images")
+    async def upload_tag_image(app: AppDep, request: Request) -> dict[str, str]:
+        data = await request.body()
+        return {
+            "image_ref": app.tags.store_image(
+                data, ext=request.query_params.get("ext", ""), content_type=request.headers.get("content-type", "")
+            )
+        }
+
+    @api.get("/api/tag-images/{ref}")
+    def get_tag_image(app: AppDep, ref: str) -> FileResponse:
+        if not ref or "/" in ref or "\\" in ref or ".." in ref:
+            raise HTTPException(status_code=404)
+        path = app.tag_images_dir / ref
+        if not path.is_file():
+            raise HTTPException(status_code=404)
+        media_type, _ = mimetypes.guess_type(path.name)
+        return FileResponse(
+            path, media_type=media_type or "application/octet-stream",
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
+        )
+
     @api.post("/api/assets/{asset_id}/tags/{tag_id}", status_code=204)
     def apply_tag(app: AppDep, asset_id: int, tag_id: int) -> Response:
         app.tags.apply_to_asset(asset_id, tag_id)

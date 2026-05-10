@@ -83,10 +83,24 @@ export const api = {
   extractSegment: (id: number, start_ms: number, end_ms: number, remove_from_source: boolean) =>
     req<EditedAsset>('POST', `/api/assets/${id}/extract-segment`, { start_ms, end_ms, remove_from_source }),
   listTags: () => req<Tag[]>('GET', '/api/tags'),
-  createTag: (t: { name: string; color: string; icon?: string | null; sort_order?: number }) =>
+  createTag: (t: { name: string; color: string; icon?: string | null; image_ref?: string | null; sort_order?: number }) =>
     req<Tag>('POST', '/api/tags', t),
   updateTag: (id: number, t: Omit<Tag, 'id' | 'asset_count'>) => req<Tag>('PUT', `/api/tags/${id}`, t),
   deleteTag: (id: number) => req<void>('DELETE', `/api/tags/${id}`),
+  uploadTagImage: async (file: File): Promise<{ image_ref: string }> => {
+    const ext = (file.name.split('.').pop() ?? '').toLowerCase();
+    const res = await fetch(`/api/tag-images?ext=${encodeURIComponent(ext)}`, {
+      method: 'POST',
+      headers: file.type ? { 'content-type': file.type } : undefined,
+      body: file,
+    });
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail ?? detail; } catch { /* ignore */ }
+      throw new Error(`${res.status}: ${detail}`);
+    }
+    return (await res.json()) as { image_ref: string };
+  },
   listSources: () => req<Source[]>('GET', '/api/sources'),
   addSource: (path: string) => req<Source>('POST', '/api/sources', { path, recursive: true, media_types: [] }),
   scanAll: () => req<{ job_id: string }>('POST', '/api/scan'),
