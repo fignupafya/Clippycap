@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from pathlib import Path
 from typing import Literal
 
@@ -25,6 +26,8 @@ from clippycap.infra.media.video_thumbnail import purge_asset_thumbnails
 _log = logging.getLogger(__name__)
 _EditMode = Literal["keep", "remove"]
 _TMP_SUFFIX = ".clippycap-tmp"
+_REPLACE_ATTEMPTS = 8       # the destination is often momentarily locked on Windows (it's being streamed)
+_REPLACE_DELAY_S = 0.25
 
 
 class EditingService:
@@ -115,6 +118,23 @@ class EditingService:
                 return candidate
         raise UnsupportedError("this asset has no readable file on disk to edit")
 
+    def _replace_locked(self, src: Path, dst: Path) -> None:
+        """``src.replace(dst)``, retrying briefly: on Windows ``dst`` is often momentarily open
+        (e.g. the player is streaming it). Cleans up ``src`` and raises if it stays locked."""
+        last: OSError | None = None
+        for _ in range(_REPLACE_ATTEMPTS):
+            try:
+                src.replace(dst)
+                return
+            except OSError as exc:
+                last = exc
+                time.sleep(_REPLACE_DELAY_S)
+        src.unlink(missing_ok=True)
+        raise UnsupportedError(
+            f"couldn't overwrite {dst.name!r} -- it is in use (the clip may still be streaming to "
+            "the player); pause/close the clip and try the edit again"
+        ) from last
+
     def _edit_in_place(self, asset_id: int, start_ms: int, end_ms: int, *, mode: _EditMode) -> Asset:
         self._require_available()
         self._validate_range(start_ms, end_ms)
@@ -137,8 +157,12 @@ class EditingService:
                     "nothing was changed"
                 )
             if self._config.editing.keep_original_backup:
-                shutil.copy2(path, path.with_name(f"{path.stem} (pre-edit backup){path.suffix}"))
-            tmp.replace(path)
+                try:
+                    shutil.copy2(path, path.with_name(f"{path.stem} (pre-edit backup){path.suffix}"))
+                except OSError as exc:
+                    tmp.unlink(missing_ok=True)
+                    raise UnsupportedError(f"couldn't write the pre-edit backup copy: {exc}") from exc
+            self._replace_locked(tmp, path)
             self._refresh_file(uow, asset, path, provider, identity_hash=new_hash)
             self._shift_notes(uow, asset_id, start_ms, end_ms, mode)
         self._bus.publish(AssetUpdated(asset_id=asset_id))
