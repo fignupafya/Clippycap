@@ -10,7 +10,6 @@ re-encodes for frame-accurate cuts (slower, a small quality cost). :class:`Unava
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -29,10 +28,23 @@ class FfmpegVideoEditor:
         self._crf = crf
         self._preset = preset
 
+    _MP4_LIKE = (".mp4", ".m4v", ".mov", ".m4a")
+
     def _codec_args(self) -> list[str]:
         if self._reencode:
             return ["-c:v", "libx264", "-crf", str(self._crf), "-preset", self._preset, "-c:a", "aac"]
         return ["-c", "copy"]
+
+    def _seek_in(self, seconds: float) -> list[str]:
+        # On a stream copy, "inaccurate" seeking snaps to a keyframe instead of leaving an mp4 edit
+        # list behind -- browsers (unlike VLC/mpv) won't play a clip that has one.
+        return ["-ss", f"{seconds:.3f}", *([] if self._reencode else ["-noaccurate_seek"])]
+
+    def _web_flags(self, out_path: Path) -> list[str]:
+        flags = ["-avoid_negative_ts", "make_zero"]                 # output timestamps start at 0
+        if out_path.suffix.lower() in self._MP4_LIKE:
+            flags += ["-movflags", "+faststart"]                    # moov atom up front -> the browser plays it at once
+        return flags
 
     def _run(self, args: list[str]) -> bool:
         try:
@@ -56,8 +68,8 @@ class FfmpegVideoEditor:
         dur = (end_ms - start_ms) / 1000.0
         if dur <= 0:
             return False
-        ok = self._run(["-ss", f"{ss:.3f}", "-i", str(source), "-t", f"{dur:.3f}",
-                        *self._codec_args(), str(out_path)])
+        ok = self._run([*self._seek_in(ss), "-i", str(source), "-t", f"{dur:.3f}",
+                        *self._codec_args(), *self._web_flags(out_path), str(out_path)])
         return ok and out_path.is_file() and out_path.stat().st_size > 0
 
     def remove_range(self, source: Path, out_path: Path, *, start_ms: int, end_ms: int) -> bool:
@@ -66,7 +78,8 @@ class FfmpegVideoEditor:
         head_end = max(0.0, start_ms / 1000.0)
         tail_start = max(head_end, end_ms / 1000.0)
         if head_end <= _TRIM_START_BELOW:    # "remove from the very start" is just "trim the start"
-            ok = self._run(["-ss", f"{tail_start:.3f}", "-i", str(source), *self._codec_args(), str(out_path)])
+            ok = self._run([*self._seek_in(tail_start), "-i", str(source), *self._codec_args(),
+                            *self._web_flags(out_path), str(out_path)])
             return ok and out_path.is_file() and out_path.stat().st_size > 0
         ext = source.suffix or ".mp4"
         with tempfile.TemporaryDirectory(prefix="clippycap-edit-") as tmp:
@@ -74,16 +87,17 @@ class FfmpegVideoEditor:
             head, tail = tmp_dir / f"head{ext}", tmp_dir / f"tail{ext}"
             if not self._run(["-i", str(source), "-t", f"{head_end:.3f}", *self._codec_args(), str(head)]):
                 return False
-            tail_ok = self._run(["-ss", f"{tail_start:.3f}", "-i", str(source), *self._codec_args(), str(tail)])
+            tail_ok = self._run([*self._seek_in(tail_start), "-i", str(source), *self._codec_args(), str(tail)])
             parts = [head]
             if tail_ok and tail.is_file() and tail.stat().st_size > 0:
                 parts.append(tail)
             if len(parts) == 1:                              # nothing after the cut -> result is just the head
-                shutil.copy2(head, out_path)
+                self._run(["-i", str(head), "-c", "copy", *self._web_flags(out_path), str(out_path)])
                 return out_path.is_file() and out_path.stat().st_size > 0
             listfile = tmp_dir / "concat.txt"
             listfile.write_text("".join(f"file '{p.as_posix()}'\n" for p in parts), encoding="utf-8")
-            ok = self._run(["-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy", str(out_path)])
+            ok = self._run(["-f", "concat", "-safe", "0", "-i", str(listfile), "-c", "copy",
+                            *self._web_flags(out_path), str(out_path)])
             return ok and out_path.is_file() and out_path.stat().st_size > 0
 
 
