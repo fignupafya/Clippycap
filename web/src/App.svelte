@@ -31,6 +31,8 @@
   let showKeys = $state(false);
   let newTagName = $state('');
   let newTagColor = $state('#56c271');
+  let tagIcon = $state('');
+  let editingTagId = $state<number | null>(null);
   let videoEl = $state<HTMLVideoElement>();
   let playbackRate = $state(1);
   let generalNoteText = $state('');
@@ -158,6 +160,19 @@
     if (!window.confirm(`Delete "${detail.title}" — the clip AND its file on disk? This cannot be undone.`)) return;
     try { await api.deleteAsset(detail.id, true); closeDetail(); await loadTags(); } catch (e) { window.alert(String(e)); }
   }
+  async function renameFile() {
+    if (!detail) return;
+    const cur = ((detail.paths.find((p) => p.present) ?? detail.paths[0])?.path) ?? '';
+    const base = cur ? (cur.split(/[\\/]/).pop() ?? '') : detail.title;
+    const next = window.prompt('New file name (the extension is kept):', base);
+    if (next == null || next.trim() === '' || next.trim() === base) return;
+    if (videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }   // release the file
+    try {
+      await new Promise<void>((r) => setTimeout(r, 250));
+      await api.renameFile(detail.id, next.trim());
+      await refreshDetail(); await loadAssets();
+    } catch (e) { window.alert(String(e)); } finally { videoVersion += 1; }
+  }
   function gotoSibling(delta: number) {
     if (!detail) return;
     const cur = detail;
@@ -184,14 +199,25 @@
       } catch (e) { scanJob = null; window.alert(String(e)); }
     })();
   }
-  async function createTag() {
-    if (!newTagName.trim()) return;
-    try { await api.createTag({ name: newTagName.trim(), color: newTagColor, sort_order: tags.length }); newTagName = ''; await loadTags(); }
-    catch (e) { window.alert(String(e)); }
+  function startEditTag(t: Tag) { editingTagId = t.id; newTagName = t.name; newTagColor = t.color; tagIcon = t.icon ?? ''; }
+  function cancelEditTag() { editingTagId = null; newTagName = ''; tagIcon = ''; }
+  async function saveTag() {
+    const name = newTagName.trim();
+    if (!name) return;
+    const icon = tagIcon.trim() || null;
+    try {
+      if (editingTagId === null) {
+        await api.createTag({ name, color: newTagColor, icon, sort_order: tags.length });
+      } else {
+        const orig = tags.find((t) => t.id === editingTagId);
+        await api.updateTag(editingTagId, { name, color: newTagColor, icon, image_ref: orig?.image_ref ?? null, description: orig?.description ?? '', sort_order: orig?.sort_order ?? 0 });
+      }
+      cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail();
+    } catch (e) { window.alert(String(e)); }
   }
   async function deleteTag(id: number) {
     if (!window.confirm('Delete this tag everywhere?')) return;
-    try { await api.deleteTag(id); await loadTags(); await loadAssets(); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    try { await api.deleteTag(id); if (editingTagId === id) cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail(); } catch (e) { window.alert(String(e)); }
   }
   async function applyTag(tagId: number) {
     if (!detail) return;
@@ -502,7 +528,7 @@
         {#if d.timestamped_notes.length === 0}<span class="faint">none yet — use “+ note @ now”</span>{/if}
         <h4>References</h4>
         <span class="faint">{d.reference_count} reference(s). Editing references (with relation types) is in the desktop UI mockup; this minimal build doesn't include it yet.</span>
-        <h4>File</h4>
+        <h4>File <button class="x" onclick={renameFile} title="rename the file on disk (keeps the extension)">✎</button></h4>
         {#each d.paths as p (p.path)}<div class="src" class:miss={!p.present} title={p.path}>{p.present ? '✓' : '✗'} {p.path}</div>{/each}
       </div>
     </div>
@@ -529,19 +555,21 @@
 
 {#if showTags}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) showTags = false; }}>
+  <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) { showTags = false; cancelEditTag(); } }}>
     <div class="modal">
-      <div class="mtop"><h3>Tags</h3><span style:flex="1"></span><button class="btn sm" onclick={() => (showTags = false)}>Close</button></div>
+      <div class="mtop"><h3>Tags</h3><span style:flex="1"></span><button class="btn sm" onclick={() => { showTags = false; cancelEditTag(); }}>Close</button></div>
       <div class="mbody">
         {#each tags as t (t.id)}
-          <div class="trow"><span class="sw" style:background={t.color}></span> <b>{t.icon ?? ''} {t.name}</b> <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => deleteTag(t.id)}>🗑</button></div>
+          <div class="trow" class:editing={editingTagId === t.id}><span class="sw" style:background={t.color}></span> <b>{t.icon ?? ''} {t.name}</b> <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => startEditTag(t)} title="edit">✎</button><button class="x" onclick={() => deleteTag(t.id)} title="delete">🗑</button></div>
         {/each}
-        <div class="trow" style:margin-top="6px">
-          <input class="field" style:max-width="160px" placeholder="new tag name" bind:value={newTagName} />
-          <input type="color" bind:value={newTagColor} />
-          <button class="btn sm primary" onclick={createTag}>+ Create</button>
+        <div class="trow" style:margin-top="8px">
+          <input class="field" style:max-width="150px" placeholder={editingTagId === null ? 'new tag name' : 'name'} bind:value={newTagName} />
+          <input type="color" bind:value={newTagColor} title="colour" />
+          <input class="field" style:max-width="60px" placeholder="icon" maxlength="8" bind:value={tagIcon} title="an emoji shown before the name" />
+          <button class="btn sm primary" onclick={saveTag}>{editingTagId === null ? '+ Create' : '💾 Save'}</button>
+          {#if editingTagId !== null}<button class="btn sm" onclick={cancelEditTag}>Cancel</button>{/if}
         </div>
-        <p class="faint" style:margin-top="10px" style:font-size="12px">Tags are flat and entirely yours: name + colour (and, in the full UI, a chosen icon or your own uploaded image). Renaming/recolouring/reordering and per-note tags are in the desktop UI mockup; this minimal build supports create / delete / apply.</p>
+        <p class="faint" style:margin-top="10px" style:font-size="12px">Tags are flat and yours: name + colour + an optional emoji icon. Click ✎ to rename / recolour / re-icon a tag; 🗑 deletes it everywhere. (Uploading a custom image as the icon is a planned addition.)</p>
       </div>
     </div>
   </div>
@@ -619,6 +647,7 @@
   .mbody { padding: 14px 16px; overflow-y: auto; }
   .trow { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
   .trow .sw { width: 16px; height: 16px; border-radius: 4px; border: 2px solid rgba(255,255,255,.13); flex: none; }
+  .trow.editing { background: var(--accent-soft); border-radius: 6px; padding-left: 6px; }
   .btn:disabled { opacity: .5; cursor: default; }
   .timeline { position: relative; height: 16px; background: var(--bg-2); border-radius: 5px; cursor: pointer; flex: none; overflow: hidden; }
   .timeline .sel { position: absolute; top: 0; bottom: 0; background: rgba(255,106,43,.22); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }

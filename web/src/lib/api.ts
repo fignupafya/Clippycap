@@ -66,6 +66,7 @@ export const api = {
   renameAsset: (id: number, title: string) => req<AssetSummary>('PATCH', `/api/assets/${id}`, { title }),
   deleteAsset: (id: number, deleteFiles = false) =>
     req<void>('DELETE', `/api/assets/${id}${deleteFiles ? '?delete_files=true' : ''}`),
+  renameFile: (id: number, name: string) => req<{ id: number; title: string }>('POST', `/api/assets/${id}/rename-file`, { name }),
   applyTag: (assetId: number, tagId: number) => req<void>('POST', `/api/assets/${assetId}/tags/${tagId}`),
   unapplyTag: (assetId: number, tagId: number) => req<void>('DELETE', `/api/assets/${assetId}/tags/${tagId}`),
   setGeneralNote: (assetId: number, body: string) => req<Note>('PUT', `/api/assets/${assetId}/notes/general`, { body }),

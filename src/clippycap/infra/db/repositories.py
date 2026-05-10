@@ -284,6 +284,12 @@ class SqliteAssetRepository(_Repo):
         ).fetchone()
         return _asset(row) if row else None
 
+    def rename_path(self, old_path: str, new_path: str) -> None:
+        try:
+            self._c.execute("UPDATE asset_paths SET path = ? WHERE path = ?", (new_path, old_path))
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError(f"a file is already registered at {new_path!r}") from exc
+
     def upsert_path(self, asset_id: int, path: str, volume_id: str | None) -> None:
         now = _now()
         existing = self._c.execute("SELECT id FROM asset_paths WHERE path = ?", (path,)).fetchone()
