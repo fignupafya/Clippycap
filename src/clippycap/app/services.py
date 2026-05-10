@@ -293,6 +293,21 @@ class NoteService:
         self._bus.publish(NoteUpdated(note_id=note_id, asset_id=note.asset_id))
         return NoteView(note=note, tag_ids=tag_ids)
 
+    def retime(self, note_id: int, timestamp_ms: int, end_timestamp_ms: int | None = None) -> NoteView:
+        if timestamp_ms < 0:
+            raise InvalidInputError("timestamp_ms must be >= 0")
+        if end_timestamp_ms is not None and end_timestamp_ms <= timestamp_ms:
+            raise InvalidInputError("end_timestamp_ms must be greater than timestamp_ms")
+        with self._db.transaction() as uow:
+            note = _require(uow.notes.get(note_id), "note", note_id)
+            if note.timestamp_ms is None:
+                raise InvalidInputError("the general note has no timestamp to change")
+            uow.notes.retime(note_id, timestamp_ms, end_timestamp_ms)
+            note.timestamp_ms, note.end_timestamp_ms = timestamp_ms, end_timestamp_ms
+            tag_ids = uow.notes.tag_ids_for_note(note_id)
+        self._bus.publish(NoteUpdated(note_id=note_id, asset_id=note.asset_id))
+        return NoteView(note=note, tag_ids=tag_ids)
+
     def delete(self, note_id: int) -> None:
         with self._db.transaction() as uow:
             note = _require(uow.notes.get(note_id), "note", note_id)
