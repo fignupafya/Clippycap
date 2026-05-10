@@ -142,6 +142,13 @@ class EditingService:
             asset = self._get(uow, asset_id)
             path = self._on_disk_path(uow, asset_id)
             provider = self._provider(asset.media_type)
+            # What source-time range the result will actually cover (the cut snaps to a frame /
+            # keyframe), so notes are shifted by the real amount instead of the requested one.
+            if mode == "keep":
+                eff_start = self._editor.resolve_cut_start(path, start_ms)
+                note_lo, note_hi = eff_start, eff_start + (end_ms - start_ms)
+            else:
+                note_lo, note_hi = start_ms, self._editor.resolve_cut_start(path, end_ms)
             tmp = path.with_name(f"{path.stem}{_TMP_SUFFIX}{path.suffix}")
             edit = self._editor.keep_range if mode == "keep" else self._editor.remove_range
             if not edit(path, tmp, start_ms=start_ms, end_ms=end_ms):
@@ -164,7 +171,7 @@ class EditingService:
                     raise UnsupportedError(f"couldn't write the pre-edit backup copy: {exc}") from exc
             self._replace_locked(tmp, path)
             self._refresh_file(uow, asset, path, provider, identity_hash=new_hash)
-            self._shift_notes(uow, asset_id, start_ms, end_ms, mode)
+            self._shift_notes(uow, asset_id, note_lo, note_hi, mode)
         self._bus.publish(AssetUpdated(asset_id=asset_id))
         with self._db.transaction() as uow:
             refreshed = uow.assets.get(asset_id)
@@ -185,35 +192,35 @@ class EditingService:
             provider.make_thumbnail(path, self._thumb_dir / f"{asset.id}.{self._config.thumbnails.format}",
                                     metadata=asset.metadata)
 
-    def _shift_notes(
-        self, uow: UnitOfWork, asset_id: int, start_ms: int, end_ms: int, mode: _EditMode
-    ) -> None:
-        gap = end_ms - start_ms
+    def _shift_notes(self, uow: UnitOfWork, asset_id: int, lo: int, hi: int, mode: _EditMode) -> None:
+        # (lo, hi) in source-time: for "keep" the range the trimmed clip covers; for "remove" the
+        # range that was removed (the head ends at lo, the tail resumes at hi).
+        gap = hi - lo
         for note in uow.notes.list_for_asset(asset_id):
             if note.timestamp_ms is None or note.id is None:
                 continue
             if mode == "keep":
-                if not (start_ms <= note.timestamp_ms <= end_ms):
+                if not (lo <= note.timestamp_ms <= hi):
                     uow.notes.delete(note.id)
                     continue
-                new_start = note.timestamp_ms - start_ms
+                new_start = note.timestamp_ms - lo
                 new_end: int | None = None
                 if note.end_timestamp_ms is not None:
-                    new_end = min(note.end_timestamp_ms, end_ms) - start_ms
+                    new_end = min(note.end_timestamp_ms, hi) - lo
                     if new_end <= new_start:
                         new_end = None
                 uow.notes.retime(note.id, new_start, new_end)
-            else:  # "remove": [start_ms, end_ms] is gone
-                if start_ms <= note.timestamp_ms <= end_ms:
+            else:  # "remove": [lo, hi) is gone
+                if lo <= note.timestamp_ms < hi:
                     uow.notes.delete(note.id)
                     continue
-                new_start = note.timestamp_ms if note.timestamp_ms < start_ms else note.timestamp_ms - gap
+                new_start = note.timestamp_ms if note.timestamp_ms < lo else note.timestamp_ms - gap
                 new_end = note.end_timestamp_ms
                 if new_end is not None:
-                    if new_end > end_ms:
+                    if new_end > hi:
                         new_end -= gap
-                    elif new_end > start_ms:
-                        new_end = start_ms              # the interval's tail was removed -- clamp to the cut
+                    elif new_end > lo:
+                        new_end = lo                    # the interval's tail fell in the cut -- clamp to it
                     if new_end <= new_start:
                         new_end = None
                 uow.notes.retime(note.id, new_start, new_end)

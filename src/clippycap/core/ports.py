@@ -213,6 +213,12 @@ class VideoEditor(Protocol):
         """Write ``out_path`` = ``source`` with ``[start_ms, end_ms]`` cut out (the surrounding parts)."""
         ...
 
+    def resolve_cut_start(self, source: Path, requested_ms: int) -> int:
+        """The source time (ms) a cut starting at ``requested_ms`` will *actually* begin at (it snaps
+        to a keyframe / frame boundary), so notes can be shifted by the right amount; returns
+        ``requested_ms`` if it cannot be determined."""
+        ...
+
 
 # --------------------------------------------------------------------------- background jobs
 
