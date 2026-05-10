@@ -1,0 +1,50 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.uv/
+uv.lock        # (remove this line if you decide to commit the lockfile)
+
+# --- type / lint / test caches ---
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- frontend (web/) ---
+web/node_modules/
+web/dist/
+web/.svelte-kit/
+*.tsbuildinfo
+
+# --- packaging ---
+packaging/build/
+packaging/dist/
+packaging/*.spec.bak
+# bundled native tools fetched by packaging/get_ffmpeg.* (not committed)
+packaging/bin/
+
+# --- app runtime data (never committed) ---
+# The real data dir lives under the OS app-data folder, but if anyone points
+# data_dir at the repo for testing, keep it out of git:
+data/
+*.sqlite
+*.sqlite-*
+
+# --- editors / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# bundled ffmpeg / ffprobe -- fetched or copied locally, never committed
+/bin/
+packaging/bin/

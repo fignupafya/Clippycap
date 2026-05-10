@@ -1,0 +1,194 @@
+# =============================================================================
+# Clippycap — default configuration  (THE single source of all defaults)
+# =============================================================================
+# This is a real, committed file — NOT defaults embedded in code. Code only ever
+# reads from the merged config; there are no code-level fallbacks. The merge
+# order is:  this file  ->  <data_dir>/local.toml  ->  CLIPPYCAP__* env vars.
+# A missing or invalid key after the merge is a HARD startup error.
+#
+# Path tokens expanded by the config loader:
+#   @appdata  -> OS app-data dir (%APPDATA% / ~/.config / ~/Library/Application Support)
+#   @data     -> the resolved application data dir (see [app].data_dir below)
+#   @install  -> the install / bundle directory
+#   @bundled  -> directory of bundled tools (e.g. the packaged ffmpeg)
+#
+# (User data — tags, notes, references, sources, saved views — is NOT here; it
+#  lives in SQLite and is edited in the UI. This file only *seeds* a few things.)
+# -----------------------------------------------------------------------------
+
+[app]
+name              = "Clippycap"
+# Where the SQLite db, local.toml, thumbnails, tag images, plugins and logs live.
+data_dir          = "@appdata/Clippycap"
+# On first run, write a commented copy of this file to <data_dir>/local.toml.
+write_local_on_first_run = true
+
+[server]
+host              = "127.0.0.1"   # local only
+port              = 0             # 0 = pick a free port automatically
+# When false, the desktop shell opens a native window (pywebview) instead of a browser tab.
+open_browser      = false
+
+[shell]
+# "pywebview" = native window (default).  "browser" = open the default browser instead.
+mode              = "pywebview"
+window_title      = "Clippycap"
+window_width      = 1360
+window_height     = 860
+remember_window_state = true
+
+[ui]
+theme             = "dark"        # "dark" | "light"
+accent_color      = "#ff6a2b"
+grid_density      = "medium"      # "small" | "medium" | "large"
+default_sort      = "recorded_desc"   # see [sort] for the available keys
+locale            = "en"
+markdown_in_notes = true
+
+[scan]
+recursive_default       = true    # default 'recursive' for newly added sources
+follow_symlinks         = false
+include_hidden_files    = false
+ignored_globs           = ["desktop.ini", "Thumbs.db", ".DS_Store", "*.part", "*.tmp", "*.crdownload"]
+# A file modified within this many seconds is skipped (it may still be being written, e.g. by OBS).
+skip_modified_within_seconds = 15
+# Scan all enabled sources automatically when the app starts.
+scan_on_startup         = true
+# Re-scan interval in minutes while running; 0 = only on demand / startup.
+periodic_scan_minutes   = 0
+
+[identity]
+# Which IdentityStrategy to use. Built-in: "blake3" (a full BLAKE3 content hash; combined with the
+# (path, size, mtime) cache, re-scanning unchanged files re-hashes nothing). Plugins may register
+# more (e.g. "perceptual_video" -- robust to re-encoding/trimming).
+strategy                = "blake3"
+# Reserved for a future "composite" strategy (cheap partial head/tail hash -> full-hash confirm).
+partial_hash_head_bytes = 65536
+partial_hash_tail_bytes = 65536
+# Use the NTFS volume + file id (when available) to avoid counting the same file twice
+# when it is reachable via multiple paths / symlinks / junctions.
+dedup_by_volume_file_id = true
+
+[hash_cache]
+enabled           = true          # cache (path,size,mtime) -> hash so re-scans don't re-hash unchanged files
+
+[thumbnails]
+cache_dir         = "@data/thumbnails"
+format            = "webp"        # "webp" | "jpg" | "png"
+width             = 480           # px; height derived from aspect ratio
+# How many thumbnails to capture per video (a single poster, or several for a hover-scrub strip).
+per_video_count   = 1
+# As a fraction of duration, where to grab the poster frame (0.0–1.0).
+poster_at_fraction = 0.25
+regenerate_on_metadata_change = true
+
+[media.ffmpeg]
+# When false, ffmpeg/ffprobe are not used at all: thumbnails are captured client-side
+# (a frame from the <video> element) and only browser-available metadata is recorded.
+enabled           = true
+# "@bundled" -> use the ffmpeg/ffprobe shipped with the app. Or an absolute path, or
+# "auto" -> search PATH. If enabled and not found, the app shows install guidance.
+ffmpeg_path       = "auto"     
+ffprobe_path      = "auto"     
+
+[media.video]
+# File extensions recognised as videos by the built-in VideoMediaType.
+extensions        = ["mp4", "mkv", "mov", "webm", "avi", "m4v", "ts", "flv", "wmv"]
+# How to derive 'recorded_at' from a file name. Tried in order; first match wins.
+# Tokens: %Y %m %d (date) and %H %M %S (time). Falls back to the file's mtime if none match.
+recorded_at_filename_patterns = [
+  "%Y-%m-%d %H-%M-%S",   # OBS default, e.g. "... 2026-05-09 19-36-44.mp4"
+  "%Y-%m-%d_%H-%M-%S",
+  "%Y%m%d_%H%M%S",
+  "%Y%m%d-%H%M%S",
+]
+identity_strategy = "blake3"      # may differ from the global default per media type
+
+[player]
+# Available playback speeds shown in the player UI.
+speeds            = [0.1, 0.25, 0.5, 1.0, 1.5, 2.0]
+default_speed     = 1.0
+# Seconds to jump for the "skip back/forward" buttons; "fine" = the Shift+arrow small jump.
+skip_seconds      = 5
+skip_seconds_fine = 1
+# When adding a timestamped note, pause playback.
+pause_on_add_note = true
+# Frame stepping: if true, use requestVideoFrameCallback when available; else seek by 1/fps.
+prefer_rvfc       = true
+
+[keybindings]
+# Player (in the Detail view)
+play_pause        = "Space"
+frame_prev        = ","
+frame_next        = "."
+skip_back         = "ArrowLeft"
+skip_fwd          = "ArrowRight"
+skip_back_fine    = "Shift+ArrowLeft"
+skip_fwd_fine     = "Shift+ArrowRight"
+speed_down        = "j"
+speed_up          = "l"
+toggle_play_k     = "k"
+loop_set_a        = "a"
+loop_set_b        = "b"
+loop_toggle       = "shift+l"
+mute_toggle       = "m"
+fullscreen_toggle = "f"
+add_note_at_time  = "n"
+capture_frame     = "shift+s"
+prev_asset        = "PageUp"
+next_asset        = "PageDown"
+# App
+focus_search      = "ctrl+k"
+open_tag_manager  = "ctrl+t"
+quick_tag_prefix  = "1-9"          # press 1..9 to toggle the Nth tag (by sort_order)
+
+[sort]
+# Available sort keys for the grid and saved views (key -> human label).
+recorded_desc     = "Recorded (newest first)"
+recorded_asc      = "Recorded (oldest first)"
+added_desc        = "Added (newest first)"
+duration_desc     = "Duration (longest first)"
+duration_asc      = "Duration (shortest first)"
+title_asc         = "Title (A→Z)"
+tag_count_desc    = "Tag count (most first)"
+last_opened_desc  = "Last opened (most recent)"
+
+[search]
+# FTS5 over note bodies and asset titles.
+fts_enabled       = true
+
+[logging]
+level             = "INFO"        # DEBUG | INFO | WARNING | ERROR
+dir               = "@data/logs"
+max_files         = 10
+max_file_mb       = 5
+
+[plugins]
+# Directories scanned for plugins at startup (each plugin = a package exposing `register(context)`).
+dirs              = ["@install/plugins", "@data/plugins"]
+# Explicitly enabled plugins (empty list = none extra). Disabled wins over enabled.
+enabled           = []
+disabled          = []
+
+# Reference relation types to SEED into the database on first run. After first run
+# these are fully editable in the UI; this list is only the initial content.
+# 'reverse' is optional — set it for a directed relation (shown differently on the two sides).
+[[seed.reference_types]]
+name    = "better version of"
+reverse = "worse version of"
+color   = "#56c271"
+[[seed.reference_types]]
+name    = "same mistake as"
+color   = "#ef5b5b"
+[[seed.reference_types]]
+name    = "see also"
+color   = "#4fb6f0"
+[[seed.reference_types]]
+name    = "continues from"
+reverse = "continued in"
+color   = "#b78bf0"
+
+[firstrun]
+# On first run, offer to add these folders as sources (existing ones only; the user confirms).
+# "@videos" -> the OS "Videos" library folder.
+suggest_sources   = ["@videos"]
