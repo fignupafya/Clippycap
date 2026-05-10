@@ -303,8 +303,8 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         return Response(status_code=204)
 
     @api.delete("/api/assets/{asset_id}", status_code=204)
-    def delete_asset(app: AppDep, asset_id: int) -> Response:
-        app.assets.delete(asset_id)
+    def delete_asset(app: AppDep, asset_id: int, delete_files: bool = False) -> Response:
+        app.assets.delete(asset_id, delete_files=delete_files)
         return Response(status_code=204)
 
     @api.get("/api/assets/{asset_id}/references")
