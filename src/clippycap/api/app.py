@@ -11,13 +11,11 @@ is the registries + the event bus + plugin-contributed routers (mounted under ``
 from __future__ import annotations
 
 import mimetypes
-import re
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -28,7 +26,6 @@ from clippycap.core.entities import Asset, ReferenceType, Source, Tag
 from clippycap.core.errors import ClippycapError, ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.query import AssetFilter
 
-_STREAM_CHUNK = 1 << 18  # 256 KiB
 _THUMBNAIL_FORMAT_EXT = {"webp": ".webp", "jpg": ".jpg", "jpeg": ".jpg", "png": ".png"}  # config -> ext
 _THUMBNAIL_EXTS = (".webp", ".jpg", ".png")  # tried in order when serving an existing thumbnail
 _THUMBNAIL_CONTENT_TYPE_EXT = {
@@ -235,24 +232,6 @@ def _thumbnail_dest(app: Application, asset_id: int, content_type: str | None) -
     return app.thumbnail_dir / f"{asset_id}{ext}"
 
 
-def _parse_range(header: str, size: int) -> tuple[int, int]:
-    match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
-    if match is None:
-        raise HTTPException(status_code=416, detail="invalid Range header")
-    start_s, end_s = match.group(1), match.group(2)
-    if start_s == "" and end_s == "":
-        raise HTTPException(status_code=416, detail="invalid Range header")
-    if start_s == "":                       # bytes=-N  -> the last N bytes
-        length = min(int(end_s), size)
-        return size - length, size - 1
-    start = int(start_s)
-    end = int(end_s) if end_s != "" else size - 1
-    end = min(end, size - 1)
-    if start > end or start >= size:
-        raise HTTPException(status_code=416, detail="Range not satisfiable")
-    return start, end
-
-
 def _require_editing(app: Application) -> None:
     if not app.editing.available:
         raise HTTPException(
@@ -365,34 +344,14 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     # ---- media: streaming + thumbnails -----------------------------------
 
     @api.get("/media/{asset_id}/stream")
-    def stream_media(app: AppDep, asset_id: int, request: Request) -> Response:
+    def stream_media(app: AppDep, asset_id: int) -> Response:
         path = app.assets.present_file_path(asset_id)
         if path is None:
             raise HTTPException(status_code=404, detail="no readable file for this asset")
-        size = path.stat().st_size
-        media_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
-        range_header = request.headers.get("range")
-        if range_header is None:
-            return FileResponse(path, media_type=media_type, headers={"accept-ranges": "bytes"})
-        start, end = _parse_range(range_header, size)
-        length = end - start + 1
-
-        def _chunks() -> Iterator[bytes]:
-            with path.open("rb") as handle:
-                handle.seek(start)
-                remaining = length
-                while remaining > 0:
-                    block = handle.read(min(_STREAM_CHUNK, remaining))
-                    if not block:
-                        break
-                    remaining -= len(block)
-                    yield block
-
-        headers = {
-            "content-range": f"bytes {start}-{end}/{size}", "accept-ranges": "bytes",
-            "content-length": str(length),
-        }
-        return StreamingResponse(_chunks(), status_code=206, media_type=media_type, headers=headers)
+        # FileResponse honours the Range header itself and -- via an ``async with`` over the file --
+        # releases the handle as soon as the response ends or the client disconnects, so a playing /
+        # buffered clip is never left open (which would otherwise block trimming it on Windows).
+        return FileResponse(path, media_type=mimetypes.guess_type(str(path))[0] or "application/octet-stream")
 
     @api.get("/thumbnails/{asset_id}")
     def thumbnail(app: AppDep, asset_id: int) -> Response:
