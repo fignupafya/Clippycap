@@ -32,6 +32,7 @@ from clippycap.core.events import (
 )
 from clippycap.core.ports import Database
 from clippycap.core.query import AssetFilter
+from clippycap.infra.media.video_thumbnail import purge_asset_thumbnails
 
 # --------------------------------------------------------------------------- result types
 
@@ -78,9 +79,10 @@ def _require[T](value: T | None, what: str, key: object) -> T:
 
 
 class AssetService:
-    def __init__(self, database: Database, event_bus: EventBus) -> None:
+    def __init__(self, database: Database, event_bus: EventBus, thumbnail_dir: Path | None = None) -> None:
         self._db = database
         self._bus = event_bus
+        self._thumbnail_dir = thumbnail_dir
 
     def list_assets(
         self, *, filter: AssetFilter, sort_key: str, offset: int, limit: int
@@ -155,6 +157,8 @@ class AssetService:
         with self._db.transaction() as uow:
             _require(uow.assets.get(asset_id), "asset", asset_id)
             uow.assets.delete(asset_id)
+        if self._thumbnail_dir is not None:
+            purge_asset_thumbnails(self._thumbnail_dir, asset_id)
         self._bus.publish(AssetRemoved(asset_id=asset_id))
 
 

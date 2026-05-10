@@ -20,6 +20,7 @@ from clippycap.core.errors import ConflictError, InvalidInputError, NotFoundErro
 from clippycap.core.events import AssetUpdated, EventBus
 from clippycap.core.ports import Database, IdentityStrategy, MediaTypeProvider, UnitOfWork, VideoEditor
 from clippycap.infra.config import Config
+from clippycap.infra.media.video_thumbnail import purge_asset_thumbnails
 
 _log = logging.getLogger(__name__)
 _EditMode = Literal["keep", "remove"]
@@ -156,9 +157,9 @@ class EditingService:
         uow.assets.update(asset)                                          # update() now also writes identity_hash
         uow.hash_cache.put(str(path), st.st_size, st.st_mtime_ns, identity_hash)  # so re-scans stay consistent
         if asset.id is not None:
-            thumb = self._thumb_dir / f"{asset.id}.{self._config.thumbnails.format}"
-            thumb.unlink(missing_ok=True)
-            provider.make_thumbnail(path, thumb, metadata=asset.metadata)
+            purge_asset_thumbnails(self._thumb_dir, asset.id)         # drop any stale variant first
+            provider.make_thumbnail(path, self._thumb_dir / f"{asset.id}.{self._config.thumbnails.format}",
+                                    metadata=asset.metadata)
 
     def _shift_notes(
         self, uow: UnitOfWork, asset_id: int, start_ms: int, end_ms: int, mode: _EditMode
