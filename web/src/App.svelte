@@ -19,6 +19,11 @@
   let searchText = $state('');
   let appliedText = $state('');
   let sort = $state('recorded_desc');
+  let selected = $state<Set<number>>(new Set());     // selected asset ids (grid multi-select)
+  let lastSelectedId = $state<number | null>(null);  // anchor for shift-range select
+  let bulkAddTag = $state('');
+  let bulkRemoveTag = $state('');
+  let bulkBusy = $state(false);
 
   let detail = $state<AssetDetail | null>(null);
   let scanJob = $state<{ scanned: number } | null>(null);
@@ -79,6 +84,11 @@
         text: appliedText.trim() || undefined, sort, limit: 300,
       });
       assets = page.items; total = page.total;
+      if (selected.size > 0) {
+        const vis = new Set(assets.map((a) => a.id));
+        const kept = [...selected].filter((id) => vis.has(id));
+        if (kept.length !== selected.size) selected = new Set(kept);
+      }
     } catch (e) { error = String(e); } finally { loading = false; }
   }
 
@@ -103,6 +113,42 @@
   function toggleTagFilter(id: number) {
     quick = 'all';
     filterTagIds = filterTagIds.includes(id) ? filterTagIds.filter((x) => x !== id) : [...filterTagIds, id];
+  }
+  function clearSelection() { selected = new Set(); lastSelectedId = null; }
+  function selectAllVisible() { selected = new Set(assets.map((a) => a.id)); lastSelectedId = assets.at(-1)?.id ?? null; }
+  function toggleSelect(a: AssetSummary) {
+    selected = selected.has(a.id) ? new Set([...selected].filter((x) => x !== a.id)) : new Set([...selected, a.id]);
+    lastSelectedId = a.id;
+  }
+  function rangeSelect(a: AssetSummary) {
+    const i = assets.findIndex((x) => x.id === lastSelectedId);
+    const j = assets.findIndex((x) => x.id === a.id);
+    if (i < 0 || j < 0) { toggleSelect(a); return; }
+    const next = new Set(selected);
+    for (let k = Math.min(i, j); k <= Math.max(i, j); k++) next.add(assets[k].id);
+    selected = next; lastSelectedId = a.id;
+  }
+  function cardClick(a: AssetSummary, e: MouseEvent) {
+    if (e.shiftKey && lastSelectedId != null) rangeSelect(a);
+    else if (e.ctrlKey || e.metaKey) toggleSelect(a);
+    else void openDetail(a);
+  }
+  async function bulkRun(label: string, fn: (id: number) => Promise<unknown>, confirmMsg?: string) {
+    const ids = [...selected];
+    if (ids.length === 0 || bulkBusy || (confirmMsg !== undefined && !window.confirm(confirmMsg))) return;
+    bulkBusy = true;
+    try {
+      const results = await Promise.allSettled(ids.map(fn));
+      const failed = results.filter((r) => r.status === 'rejected').length;
+      await loadAssets(); await loadTags(); await refreshDetail();
+      if (failed > 0) window.alert(`${label}: ${ids.length - failed} ok, ${failed} failed.`);
+    } finally { bulkBusy = false; }
+  }
+  function bulkApplyTag(tagId: number) { void bulkRun('apply tag', (id) => api.applyTag(id, tagId)); }
+  function bulkRemoveTagFn(tagId: number) { void bulkRun('remove tag', (id) => api.unapplyTag(id, tagId)); }
+  function bulkDelete() {
+    const n = selected.size;
+    void bulkRun('delete', (id) => api.deleteAsset(id, true), `Delete ${n} clip(s) AND their files from disk? This cannot be undone.`);
   }
   async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); }
   async function refreshDetail() { if (detail) detail = await api.getAsset(detail.id); }
@@ -249,7 +295,12 @@
     return [...mods, e.key === ' ' ? 'space' : e.key].join('+').toLowerCase();
   }
   function onKey(e: KeyboardEvent) {
-    if (!detail || inEditable(e.target)) return;
+    if (inEditable(e.target)) return;
+    if (!detail) {                                          // grid view
+      if (e.key === 'Escape' && selected.size > 0) clearSelection();
+      else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && assets.length > 0) { e.preventDefault(); selectAllVisible(); }
+      return;
+    }
     if (e.key === 'Escape') { closeDetail(); return; }
     const k = keyName(e);
     const actions: [string, () => void][] = [
@@ -310,13 +361,26 @@
 
     <main>
       {#if error}<div class="err">{error}</div>{/if}
+      {#if selected.size > 0}
+        <div class="bulkbar">
+          <b>{selected.size}</b> selected
+          <button class="btn sm" onclick={selectAllVisible}>all ({assets.length})</button>
+          <button class="btn sm" onclick={clearSelection}>clear</button>
+          <span style:flex="1"></span>
+          <label>+ tag <select bind:value={bulkAddTag} disabled={bulkBusy} onchange={() => { if (bulkAddTag) { bulkApplyTag(Number(bulkAddTag)); bulkAddTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{t.icon ?? ''} {t.name}</option>{/each}</select></label>
+          <label>− tag <select bind:value={bulkRemoveTag} disabled={bulkBusy} onchange={() => { if (bulkRemoveTag) { bulkRemoveTagFn(Number(bulkRemoveTag)); bulkRemoveTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{t.icon ?? ''} {t.name}</option>{/each}</select></label>
+          <button class="btn sm" disabled={bulkBusy} onclick={bulkDelete}>🗑 delete {selected.size}</button>
+        </div>
+      {/if}
       <div class="bar"><b>{total}</b> clips{loading ? ' · loading…' : ''}{filterTagIds.length ? ' · filtered by ' + filterTagIds.length + ' tag(s)' : ''}</div>
       <div class="grid">
         {#each assets as a (a.id)}
-          <button class="card" onclick={() => openDetail(a)}>
+          <button class="card" class:sel={selected.has(a.id)} onclick={(e) => cardClick(a, e)}>
             <div class="thumb">
               <img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} />
               <span class="film">▶</span>
+              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+              <span class="selbox" class:on={selected.has(a.id)} onclick={(e) => { e.stopPropagation(); toggleSelect(a); }} title="select (Ctrl-click / Shift-click range)">{selected.has(a.id) ? '✓' : ''}</span>
               {#if durationOf(a.metadata)}<span class="dur">{durationOf(a.metadata)}</span>{/if}
               {#if a.is_new}<span class="badge bnew">new</span>{/if}
               {#if a.note_count}<span class="badge">📝 {a.note_count}</span>{/if}
@@ -539,6 +603,13 @@
   .tsn .body { flex: 1; font-size: 13px; }
   .tsntags { display: flex; flex-wrap: wrap; gap: 4px; margin: -2px 0 9px; padding-left: 2px; }
   .tagchip.ntag { font-size: 10px; padding: 1px 6px; }
+  .card.sel { outline: 2.5px solid var(--accent); outline-offset: -2px; }
+  .selbox { position: absolute; left: 6px; top: 6px; width: 18px; height: 18px; border-radius: 4px; border: 2px solid rgba(255,255,255,.55); background: rgba(0,0,0,.45); display: grid; place-items: center; font-size: 12px; font-weight: 900; color: #fff; opacity: 0; pointer-events: none; transition: opacity .1s; }
+  .thumb:hover .selbox, .selbox.on { opacity: 1; pointer-events: auto; }
+  .selbox.on { background: var(--accent); border-color: var(--accent); color: #1a0e07; }
+  .bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 11px; margin-bottom: 10px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; }
+  .bulkbar label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+  .bulkbar select { background: var(--bg-2); color: inherit; border: 1px solid var(--border); border-radius: 5px; padding: 2px 4px; }
   .x { color: var(--text-3); }
   .x:hover { color: #ef5b5b; }
   .modal-bg { position: fixed; inset: 0; background: rgba(4,6,9,.66); display: grid; place-items: center; z-index: 60; padding: 30px; }
