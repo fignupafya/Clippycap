@@ -107,6 +107,11 @@
   async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); }
   async function refreshDetail() { if (detail) detail = await api.getAsset(detail.id); }
   function closeDetail() { detail = null; void loadAssets(); }
+  async function deleteCurrentClip() {
+    if (!detail) return;
+    if (!window.confirm(`Delete "${detail.title}" — the clip AND its file on disk? This cannot be undone.`)) return;
+    try { await api.deleteAsset(detail.id, true); closeDetail(); await loadTags(); } catch (e) { window.alert(String(e)); }
+  }
   function gotoSibling(delta: number) {
     if (!detail) return;
     const cur = detail;
@@ -341,6 +346,7 @@
       <button class="btn sm" onclick={() => gotoSibling(1)} title="Next clip ({binding('next_asset')})">›</button>
       <div class="otitle">{d.title}</div>
       <span style:flex="1"></span>
+      <button class="btn sm" onclick={deleteCurrentClip} title="Delete this clip and its file from disk">🗑 Delete clip</button>
       <button class="btn sm" onclick={() => (showKeys = true)} title="Keyboard shortcuts">⌨ Keys</button>
     </div>
     <div class="obody">

@@ -9,6 +9,7 @@ are in their own modules.)
 
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -153,12 +154,16 @@ class AssetService:
             uow.assets.touch_opened(asset_id)
         self._bus.publish(AssetOpened(asset_id=asset_id))
 
-    def delete(self, asset_id: int) -> None:
+    def delete(self, asset_id: int, *, delete_files: bool = False) -> None:
         with self._db.transaction() as uow:
             _require(uow.assets.get(asset_id), "asset", asset_id)
+            file_paths = [p.path for p in uow.assets.get_paths(asset_id) if p.present] if delete_files else []
             uow.assets.delete(asset_id)
         if self._thumbnail_dir is not None:
             purge_asset_thumbnails(self._thumbnail_dir, asset_id)
+        for file_path in file_paths:
+            with contextlib.suppress(OSError):
+                Path(file_path).unlink(missing_ok=True)
         self._bus.publish(AssetRemoved(asset_id=asset_id))
 
 
