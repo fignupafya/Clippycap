@@ -129,6 +129,10 @@ class TitleBody(BaseModel):
     title: str = Field(min_length=1)
 
 
+class RenameFileBody(BaseModel):
+    name: str = Field(min_length=1)
+
+
 class GeneralNoteBody(BaseModel):
     body: str = ""
 
@@ -292,6 +296,10 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     @api.patch("/api/assets/{asset_id}")
     def rename_asset(app: AppDep, asset_id: int, body: TitleBody) -> dict[str, Any]:
         return _asset_dict(app.assets.update_title(asset_id, body.title))
+
+    @api.post("/api/assets/{asset_id}/rename-file")
+    def rename_asset_file(app: AppDep, asset_id: int, body: RenameFileBody) -> dict[str, Any]:
+        return _asset_dict(app.assets.rename_file(asset_id, body.name))
 
     @api.patch("/api/assets/{asset_id}/metadata")
     def patch_metadata(app: AppDep, asset_id: int, body: MetadataBody) -> dict[str, Any]:

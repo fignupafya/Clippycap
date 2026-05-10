@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from clippycap.core.entities import Asset, AssetPath, Note, Tag
-from clippycap.core.errors import InvalidInputError, NotFoundError
+from clippycap.core.errors import ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.events import (
     AssetOpened,
     AssetRemoved,
@@ -137,6 +137,36 @@ class AssetService:
             asset = _require(uow.assets.get(asset_id), "asset", asset_id)
             asset.title = title
             uow.assets.update(asset)
+        self._bus.publish(AssetUpdated(asset_id=asset_id))
+        return asset
+
+    def rename_file(self, asset_id: int, new_name: str) -> Asset:
+        cleaned = new_name.strip().strip(". ")
+        if not cleaned or "/" in cleaned or "\\" in cleaned:
+            raise InvalidInputError("the new name must be a plain file name (no path separators)")
+        with self._db.transaction() as uow:
+            asset = _require(uow.assets.get(asset_id), "asset", asset_id)
+            old_path = next(
+                (Path(p.path) for p in uow.assets.get_paths(asset_id) if p.present and Path(p.path).is_file()), None
+            )
+            if old_path is None:
+                raise UnsupportedError("this asset has no readable file on disk to rename")
+            keep_ext = bool(old_path.suffix) and not cleaned.lower().endswith(old_path.suffix.lower())
+            new_path = old_path.with_name(cleaned + old_path.suffix if keep_ext else cleaned)
+            if new_path == old_path:
+                return asset
+            if str(new_path).lower() != str(old_path).lower() and new_path.exists():
+                raise ConflictError(f"a file named {new_path.name!r} already exists in that folder")
+            try:
+                old_path.rename(new_path)
+            except OSError as exc:
+                raise UnsupportedError(
+                    f"couldn't rename {old_path.name!r}: {exc} -- the file may be in use; close it and try again"
+                ) from exc
+            st = new_path.stat()
+            uow.assets.rename_path(str(old_path), str(new_path))
+            uow.hash_cache.forget(str(old_path))
+            uow.hash_cache.put(str(new_path), st.st_size, st.st_mtime_ns, asset.identity_hash)
         self._bus.publish(AssetUpdated(asset_id=asset_id))
         return asset
 
