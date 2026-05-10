@@ -10,6 +10,7 @@ re-encodes for frame-accurate cuts (slower, a small quality cost). :class:`Unava
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -100,6 +101,25 @@ class FfmpegVideoEditor:
                             *self._web_flags(out_path), str(out_path)])
             return ok and out_path.is_file() and out_path.stat().st_size > 0
 
+    def resolve_cut_start(self, source: Path, requested_ms: int) -> int:
+        # Ask ffmpeg what the *first frame* its seek to requested_ms lands on is (re-encode: the first
+        # frame >= requested_ms; stream copy: the keyframe <= requested_ms) -- showinfo prints its pts.
+        req_s = max(0.0, requested_ms / 1000.0)
+        args = ["-ss", f"{req_s:.3f}", *([] if self._reencode else ["-noaccurate_seek"]),
+                "-i", str(source), "-vf", "showinfo", "-frames:v", "1", "-f", "null", "-"]
+        try:
+            done = subprocess.run([str(self._ffmpeg), "-hide_banner", "-loglevel", "info", *args],
+                                  capture_output=True, timeout=60, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return requested_ms
+        match = re.search(r"pts_time:([\d.]+)", done.stderr.decode("utf-8", "replace"))
+        if match is None:
+            return requested_ms
+        try:
+            return round(float(match.group(1)) * 1000.0)
+        except ValueError:
+            return requested_ms
+
 
 class UnavailableVideoEditor:
     available = False
@@ -111,3 +131,7 @@ class UnavailableVideoEditor:
     def remove_range(self, source: Path, out_path: Path, *, start_ms: int, end_ms: int) -> bool:
         _ = (source, out_path, start_ms, end_ms)
         return False
+
+    def resolve_cut_start(self, source: Path, requested_ms: int) -> int:
+        _ = source
+        return requested_ms
