@@ -151,6 +151,11 @@ class NoteTagsBody(BaseModel):
     tag_ids: list[int]
 
 
+class NoteTimeBody(BaseModel):
+    timestamp_ms: int = Field(ge=0)
+    end_timestamp_ms: int | None = Field(default=None, ge=0)
+
+
 class SourceBody(BaseModel):
     path: str = Field(min_length=1)
     recursive: bool = True
@@ -460,6 +465,10 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     def set_note_tags(app: AppDep, note_id: int, body: NoteTagsBody) -> Response:
         app.notes.set_tags(note_id, body.tag_ids)
         return Response(status_code=204)
+
+    @api.put("/api/notes/{note_id}/time")
+    def retime_note(app: AppDep, note_id: int, body: NoteTimeBody) -> dict[str, Any]:
+        return _note_dict(app.notes.retime(note_id, body.timestamp_ms, end_timestamp_ms=body.end_timestamp_ms))
 
     # ---- references ------------------------------------------------------
 

@@ -70,6 +70,9 @@ export const api = {
   addTimestampNote: (assetId: number, timestamp_ms: number, body: string, end_timestamp_ms?: number) =>
     req<Note>('POST', `/api/assets/${assetId}/notes`, { timestamp_ms, body, end_timestamp_ms }),
   deleteNote: (id: number) => req<void>('DELETE', `/api/notes/${id}`),
+  setNoteTags: (noteId: number, tag_ids: number[]) => req<void>('PUT', `/api/notes/${noteId}/tags`, { tag_ids }),
+  retimeNote: (noteId: number, timestamp_ms: number, end_timestamp_ms?: number) =>
+    req<Note>('PUT', `/api/notes/${noteId}/time`, { timestamp_ms, end_timestamp_ms }),
   trimAsset: (id: number, start_ms: number, end_ms: number) =>
     req<EditedAsset>('POST', `/api/assets/${id}/trim`, { start_ms, end_ms }),
   removeSegment: (id: number, start_ms: number, end_ms: number) =>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, Note, Source, Tag } from './lib/api';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
@@ -168,6 +168,20 @@
   }
   async function deleteNote(id: number) {
     try { await api.deleteNote(id); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+  }
+  async function retimeNote(n: Note) {
+    const start = frameNowMs();
+    const end = n.end_timestamp_ms != null ? start + Math.max(1, n.end_timestamp_ms - (n.timestamp_ms ?? 0)) : undefined;
+    try { await api.retimeNote(n.id, start, end); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+  }
+  async function addTagToNote(n: Note, tagId: number) {
+    if (!detail) return;
+    // convenience: tagging a moment also tags the clip (the user can still untag the clip below)
+    try { await api.setNoteTags(n.id, [...n.tag_ids, tagId]); await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); }
+    catch (e) { window.alert(String(e)); }
+  }
+  async function removeTagFromNote(n: Note, tagId: number) {
+    try { await api.setNoteTags(n.id, n.tag_ids.filter((x) => x !== tagId)); await refreshDetail(); } catch (e) { window.alert(String(e)); }
   }
   // Adding ~half a frame keeps the seek target solidly inside that frame's presentation window, so
   // millisecond rounding (in the stored timestamp, or after a trim's shift) can't land us a frame early.
@@ -400,9 +414,19 @@
         <h4>Timestamped notes</h4>
         {#each d.timestamped_notes as n (n.id)}
           <div class="tsn">
-            <button class="ts" onclick={() => seek(n.timestamp_ms ?? 0)}>{n.end_timestamp_ms != null ? `${fmt(n.timestamp_ms ?? 0)}–${fmt(n.end_timestamp_ms)}` : fmt(n.timestamp_ms ?? 0)}</button>
+            <button class="ts" onclick={() => seek(n.timestamp_ms ?? 0)} title="seek here">{n.end_timestamp_ms != null ? `${fmt(n.timestamp_ms ?? 0)}–${fmt(n.end_timestamp_ms)}` : fmt(n.timestamp_ms ?? 0)}</button>
             <span class="body">{n.body}</span>
-            <button class="x" onclick={() => deleteNote(n.id)}>🗑</button>
+            <button class="x" onclick={() => retimeNote(n)} title="move to {fmt(curMs)}">↻</button>
+            <button class="x" onclick={() => deleteNote(n.id)} title="delete">🗑</button>
+          </div>
+          <div class="tsntags">
+            {#each n.tag_ids as id (id)}
+              {@const t = tagById.get(id)}
+              {#if t}<span class="pill" style:background={t.color}>{t.icon ?? ''} {t.name} <button class="x" onclick={() => removeTagFromNote(n, t.id)}>×</button></span>{/if}
+            {/each}
+            {#each tags.filter((t) => !n.tag_ids.includes(t.id)) as t (t.id)}
+              <button class="tagchip ntag" onclick={() => addTagToNote(n, t.id)}>+ {t.icon ?? ''} {t.name}</button>
+            {/each}
           </div>
         {/each}
         {#if d.timestamped_notes.length === 0}<span class="faint">none yet — use “+ note @ now”</span>{/if}
@@ -471,7 +495,7 @@
   .tagcloud { display: flex; flex-wrap: wrap; gap: 5px; }
   .tagchip { padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: var(--bg-3); border: 1px solid var(--border); color: var(--text-2); }
   .tagchip:hover { color: var(--text); }
-  .tagchip.on { color: #0e1116; border-color: transparent; }
+  .tagchip.on { color: #f7f9fb; border-color: transparent; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
   .tagchip .n { font-family: ui-monospace, monospace; font-size: 10px; opacity: .6; }
   .src { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text-2); padding: 3px 0; word-break: break-all; }
   .src.miss { color: var(--text-3); text-decoration: line-through; }
@@ -490,7 +514,8 @@
   .cb { padding: 8px 9px; }
   .cb .ct { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cb .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
-  .pill .x { color: rgba(0,0,0,.55); font-weight: 800; }
+  .pill { color: #f7f9fb; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
+  .pill .x { font-weight: 800; }
   .overlay { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; z-index: 50; }
   .otop { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 48px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
   .otitle { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -506,6 +531,8 @@
   .tsn { display: flex; gap: 8px; align-items: flex-start; padding: 7px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; margin-bottom: 6px; }
   .tsn .ts { font-family: ui-monospace, monospace; font-size: 11.5px; font-weight: 700; color: var(--amber); background: rgba(240,179,79,.13); border: 1px solid rgba(240,179,79,.3); padding: 2px 6px; border-radius: 5px; flex: none; }
   .tsn .body { flex: 1; font-size: 13px; }
+  .tsntags { display: flex; flex-wrap: wrap; gap: 4px; margin: -2px 0 9px; padding-left: 2px; }
+  .tagchip.ntag { font-size: 10px; padding: 1px 6px; }
   .x { color: var(--text-3); }
   .x:hover { color: #ef5b5b; }
   .modal-bg { position: fixed; inset: 0; background: rgba(4,6,9,.66); display: grid; place-items: center; z-index: 60; padding: 30px; }
