@@ -1,0 +1,64 @@
+[project]
+name = "clippycap"
+version = "0.0.0"
+description = "Local, extensible media library + annotation tool (gameplay-clip review and more)."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "PolyForm-Noncommercial-1.0.0" }
+dependencies = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "blake3>=0.4",
+    "pywebview>=5.1",
+    # NOTE: ffmpeg/ffprobe are NOT Python packages — they are native binaries bundled
+    # at packaging time (see packaging/). The "no-ffmpeg" fallback needs no extra deps.
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.2",
+    "pytest-asyncio>=0.23",
+    "httpx>=0.27",          # for testing the FastAPI app
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+clippycap = "clippycap.shell.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clippycap"]
+
+# --- tooling ---------------------------------------------------------------
+
+[tool.ruff]
+src = ["src", "tests"]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "PL", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PLR2004", "E501", "F841", "RUF059"]   # tests assign/unpack and carry long inline data freely
+
+[tool.ruff.lint.pylint]
+max-args = 8        # DI'd services and entities with many fields carry several parameters
+max-branches = 15   # query builders that translate many optional filters are legitimately branchy
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+mypy_path = "src"
+packages = ["clippycap"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
