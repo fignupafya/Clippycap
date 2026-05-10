@@ -117,10 +117,12 @@ pause_on_add_note = true
 prefer_rvfc       = true
 
 [editing]
-# Trimming / cutting clips with ffmpeg. By default ffmpeg cuts at keyframes — instant and lossless,
-# but the cut point may land up to a GOP (~1–2 s) early. Set reencode=true for frame-accurate cuts
-# (re-encodes the result => slower, with a small quality cost).
-reencode               = false
+# Trimming / cutting clips with ffmpeg.
+#  reencode = true  (default): re-encode the cut -> frame-accurate, so timestamped notes stay
+#    aligned, and the output is a clean, browser-playable file; a bit slower + a tiny quality cost.
+#  reencode = false: stream-copy (instant, lossless) but the cut START snaps to the nearest keyframe
+#    before it -- the result can be ~1-2 s off, and notes that fall inside it shift by that much.
+reencode               = true
 reencode_crf           = 18           # 0–51, lower = better quality (only when reencode=true)
 reencode_preset        = "veryfast"
 # Trim / "remove segment" / "cut segment" overwrite the ORIGINAL file in place (there is no undo).
