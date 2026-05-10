@@ -25,7 +25,7 @@ from clippycap.app.bootstrap import Application
 from clippycap.app.reference_service import ReferenceView
 from clippycap.app.services import AssetDetail, AssetSummary, NoteView
 from clippycap.core.entities import Asset, ReferenceType, Source, Tag
-from clippycap.core.errors import ClippycapError, ConflictError, InvalidInputError, NotFoundError
+from clippycap.core.errors import ClippycapError, ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.query import AssetFilter
 
 _STREAM_CHUNK = 1 << 18  # 256 KiB
@@ -77,7 +77,8 @@ def _note_dict(view: NoteView) -> dict[str, Any]:
     note = view.note
     return {
         "id": note.id, "asset_id": note.asset_id, "body": note.body, "timestamp_ms": note.timestamp_ms,
-        "tag_ids": view.tag_ids, "created_at": _iso(note.created_at), "updated_at": _iso(note.updated_at),
+        "end_timestamp_ms": note.end_timestamp_ms, "tag_ids": view.tag_ids,
+        "created_at": _iso(note.created_at), "updated_at": _iso(note.updated_at),
     }
 
 
@@ -137,6 +138,7 @@ class GeneralNoteBody(BaseModel):
 
 class TimestampNoteBody(BaseModel):
     timestamp_ms: int = Field(ge=0)
+    end_timestamp_ms: int | None = Field(default=None, ge=0)   # set => an interval note
     body: str = ""
 
 
@@ -192,6 +194,17 @@ class MetadataBody(BaseModel):
     metadata: dict[str, Any]
 
 
+class SegmentBody(BaseModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+
+
+class ExtractSegmentBody(BaseModel):
+    start_ms: int = Field(ge=0)
+    end_ms: int = Field(gt=0)
+    remove_from_source: bool = False
+
+
 # --------------------------------------------------------------------------- helpers
 
 
@@ -240,6 +253,15 @@ def _parse_range(header: str, size: int) -> tuple[int, int]:
     return start, end
 
 
+def _require_editing(app: Application) -> None:
+    if not app.editing.available:
+        raise HTTPException(
+            status_code=503,
+            detail="clip editing is unavailable: ffmpeg is not configured "
+                   "(media.ffmpeg.enabled is false, or no ffmpeg binary was found)",
+        )
+
+
 # --------------------------------------------------------------------------- the app
 
 
@@ -249,7 +271,9 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
 
     @api.exception_handler(ClippycapError)
     async def _domain_error(_request: Request, exc: ClippycapError) -> JSONResponse:
-        status = {NotFoundError: 404, ConflictError: 409, InvalidInputError: 400}.get(type(exc), 400)
+        status = {NotFoundError: 404, ConflictError: 409, InvalidInputError: 400, UnsupportedError: 503}.get(
+            type(exc), 400
+        )
         return JSONResponse(status_code=status, content={"detail": str(exc)})
 
     # ---- assets ----------------------------------------------------------
@@ -315,7 +339,28 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
 
     @api.post("/api/assets/{asset_id}/notes", status_code=201)
     def add_timestamp_note(app: AppDep, asset_id: int, body: TimestampNoteBody) -> dict[str, Any]:
-        return _note_dict(app.notes.add_timestamped(asset_id, body.timestamp_ms, body.body))
+        return _note_dict(app.notes.add_timestamped(
+            asset_id, body.timestamp_ms, body.body, end_timestamp_ms=body.end_timestamp_ms
+        ))
+
+    # ---- editing: trim / cut / extract (needs ffmpeg) --------------------
+
+    @api.post("/api/assets/{asset_id}/trim")
+    def trim_asset(app: AppDep, asset_id: int, body: SegmentBody) -> dict[str, Any]:
+        _require_editing(app)
+        return _asset_dict(app.editing.trim(asset_id, start_ms=body.start_ms, end_ms=body.end_ms))
+
+    @api.post("/api/assets/{asset_id}/remove-segment")
+    def remove_asset_segment(app: AppDep, asset_id: int, body: SegmentBody) -> dict[str, Any]:
+        _require_editing(app)
+        return _asset_dict(app.editing.remove_segment(asset_id, start_ms=body.start_ms, end_ms=body.end_ms))
+
+    @api.post("/api/assets/{asset_id}/extract-segment", status_code=201)
+    def extract_asset_segment(app: AppDep, asset_id: int, body: ExtractSegmentBody) -> dict[str, Any]:
+        _require_editing(app)
+        return _asset_dict(app.editing.extract_segment(
+            asset_id, start_ms=body.start_ms, end_ms=body.end_ms, remove_from_source=body.remove_from_source,
+        ))
 
     # ---- media: streaming + thumbnails -----------------------------------
 

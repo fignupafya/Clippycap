@@ -111,6 +111,22 @@ class PlayerConfig(_Section):
     prefer_rvfc: bool
 
 
+class EditingConfig(_Section):
+    # ffmpeg cuts at keyframes by default (instant, lossless, but the cut can land up to a GOP
+    # early); set true to re-encode for frame-accurate cuts (slower, a tiny quality cost).
+    reencode: bool
+    reencode_crf: int = Field(ge=0, le=51)
+    reencode_preset: str = Field(min_length=1)
+    # Trim / remove-segment / cut overwrite the original file in place; when true, a copy of the
+    # pre-edit file is kept beside it first.
+    keep_original_backup: bool
+    # Name for the new clip produced by save/cut-segment. Placeholders: {stem} {start} {end} {ext}
+    # ({start}/{end} formatted as "mm-ss").
+    new_clip_name_template: str = Field(min_length=1)
+    # Reference type (by name) auto-linking an extracted clip to its source; "" => don't create one.
+    excerpt_reference_type: str
+
+
 class SearchConfig(_Section):
     fts_enabled: bool
 
@@ -155,6 +171,7 @@ class Config(_Section):
     thumbnails: ThumbnailsConfig
     media: MediaConfig
     player: PlayerConfig
+    editing: EditingConfig
     keybindings: dict[str, str]
     sort: dict[str, str]
     search: SearchConfig

@@ -8,7 +8,10 @@ export interface AssetSummary {
   last_opened_at: string | null;
 }
 export interface AssetPage { items: AssetSummary[]; total: number; offset: number; limit: number; }
-export interface Note { id: number; asset_id: number; body: string; timestamp_ms: number | null; tag_ids: number[]; }
+export interface Note {
+  id: number; asset_id: number; body: string;
+  timestamp_ms: number | null; end_timestamp_ms?: number | null; tag_ids: number[];
+}
 export interface AssetDetail extends AssetSummary {
   paths: { path: string; present: boolean; volume_id: string | null }[];
   general_note: string | null; general_note_id: number | null; timestamped_notes: Note[];
@@ -19,6 +22,9 @@ export interface Tag {
 }
 export interface Source { id: number; path: string; recursive: boolean; enabled: boolean; media_types: string[]; last_scanned_at: string | null; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }
+export interface Health { name: string; ffmpeg: boolean; media_types: string[]; plugins: string[]; }
+export type AppConfig = Record<string, unknown> & { keybindings: Record<string, string>; player: Record<string, number> };
+type EditedAsset = { id: number; title: string };
 
 interface AssetQuery {
   tags_all?: number[]; tags_any?: number[]; untagged?: boolean; text?: string;
@@ -52,6 +58,8 @@ function qs(params: Record<string, unknown>): string {
 }
 
 export const api = {
+  getConfig: () => req<AppConfig>('GET', '/api/config'),
+  getHealth: () => req<Health>('GET', '/api/health'),
   listAssets: (q: AssetQuery = {}) => req<AssetPage>('GET', `/api/assets${qs(q as Record<string, unknown>)}`),
   getAsset: (id: number) => req<AssetDetail>('GET', `/api/assets/${id}`),
   markOpened: (id: number) => req<void>('POST', `/api/assets/${id}/opened`),
@@ -59,9 +67,15 @@ export const api = {
   applyTag: (assetId: number, tagId: number) => req<void>('POST', `/api/assets/${assetId}/tags/${tagId}`),
   unapplyTag: (assetId: number, tagId: number) => req<void>('DELETE', `/api/assets/${assetId}/tags/${tagId}`),
   setGeneralNote: (assetId: number, body: string) => req<Note>('PUT', `/api/assets/${assetId}/notes/general`, { body }),
-  addTimestampNote: (assetId: number, timestamp_ms: number, body: string) =>
-    req<Note>('POST', `/api/assets/${assetId}/notes`, { timestamp_ms, body }),
+  addTimestampNote: (assetId: number, timestamp_ms: number, body: string, end_timestamp_ms?: number) =>
+    req<Note>('POST', `/api/assets/${assetId}/notes`, { timestamp_ms, body, end_timestamp_ms }),
   deleteNote: (id: number) => req<void>('DELETE', `/api/notes/${id}`),
+  trimAsset: (id: number, start_ms: number, end_ms: number) =>
+    req<EditedAsset>('POST', `/api/assets/${id}/trim`, { start_ms, end_ms }),
+  removeSegment: (id: number, start_ms: number, end_ms: number) =>
+    req<EditedAsset>('POST', `/api/assets/${id}/remove-segment`, { start_ms, end_ms }),
+  extractSegment: (id: number, start_ms: number, end_ms: number, remove_from_source: boolean) =>
+    req<EditedAsset>('POST', `/api/assets/${id}/extract-segment`, { start_ms, end_ms, remove_from_source }),
   listTags: () => req<Tag[]>('GET', '/api/tags'),
   createTag: (t: { name: string; color: string; icon?: string | null; sort_order?: number }) =>
     req<Tag>('POST', '/api/tags', t),

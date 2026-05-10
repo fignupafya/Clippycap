@@ -57,11 +57,17 @@ class Tag:
 
 @dataclass(slots=True)
 class Note:
-    """Markdown text attached to an Asset. ``timestamp_ms is None`` => the asset's general note."""
+    """Markdown text attached to an Asset.
+
+    ``timestamp_ms is None``                        => the asset's single general note.
+    ``timestamp_ms`` set, ``end_timestamp_ms`` None => pinned to one moment.
+    both set                                        => covers the interval ``[timestamp_ms, end_timestamp_ms]``.
+    """
 
     asset_id: int
     body: str
     timestamp_ms: int | None = None
+    end_timestamp_ms: int | None = None     # set (with timestamp_ms) => an interval note
     created_at: datetime | None = None
     updated_at: datetime | None = None
     id: int | None = None

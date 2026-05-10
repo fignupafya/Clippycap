@@ -146,5 +146,8 @@ CREATE TRIGGER trg_notes_search_ad AFTER DELETE ON notes BEGIN
 END;
 """
 
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SCHEMA_V1),)
+# v2: a timestamped note may span an interval (end_timestamp_ms), not just a single moment.
+_MIGRATION_V2 = "ALTER TABLE notes ADD COLUMN end_timestamp_ms INTEGER;"
+
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SCHEMA_V1), (2, _MIGRATION_V2))
 LATEST_VERSION: int = MIGRATIONS[-1][0]

@@ -14,17 +14,19 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from clippycap.app.editing_service import EditingService
 from clippycap.app.jobs import ThreadJobQueue
 from clippycap.app.reference_service import ReferenceService, ReferenceTypeService
 from clippycap.app.scan_service import ScanService
 from clippycap.app.services import AssetService, NoteService, TagService
 from clippycap.app.source_service import SavedViewService, SourceService
 from clippycap.core.entities import ReferenceType
-from clippycap.core.ports import MetadataExtractor, Thumbnailer
+from clippycap.core.ports import MetadataExtractor, Thumbnailer, VideoEditor
 from clippycap.infra.config import Config, load_config
 from clippycap.infra.config.loader import default_install_dir
 from clippycap.infra.db.database import SqliteDatabase
 from clippycap.infra.media.ffmpeg import resolve_ffmpeg_tools
+from clippycap.infra.media.video_editor import FfmpegVideoEditor, UnavailableVideoEditor
 from clippycap.infra.media.video_metadata import FfprobeMetadataExtractor, NoOpMetadataExtractor
 from clippycap.infra.media.video_thumbnail import FfmpegThumbnailer, UnavailableThumbnailer
 from clippycap.infra.scan.hashing import Blake3IdentityStrategy
@@ -58,6 +60,7 @@ class Application:
     sources: SourceService
     saved_views: SavedViewService
     scans: ScanService
+    editing: EditingService
     loaded_plugins: list[str]
     data_dir: Path
     thumbnail_dir: Path
@@ -147,12 +150,24 @@ def build_application(
     )
     jobs = ThreadJobQueue()
 
+    if ffmpeg_path is not None:
+        video_editor: VideoEditor = FfmpegVideoEditor(
+            ffmpeg_path, reencode=config.editing.reencode,
+            crf=config.editing.reencode_crf, preset=config.editing.reencode_preset,
+        )
+    else:
+        video_editor = UnavailableVideoEditor()
+    editing_service = EditingService(
+        database, video_editor, dict(registries.media_types.items()),
+        dict(registries.identity_strategies.items()), event_bus, config, thumbnail_dir,
+    )
+
     return Application(
         config=config, database=database, event_bus=event_bus, registries=registries, jobs=jobs,
         assets=AssetService(database, event_bus), tags=TagService(database, event_bus),
         notes=NoteService(database, event_bus), references=ReferenceService(database, event_bus),
         reference_types=ReferenceTypeService(database), sources=SourceService(database, event_bus),
         saved_views=SavedViewService(database), scans=ScanService(database, scanner, jobs, event_bus),
-        loaded_plugins=loaded_plugins, data_dir=data_dir, thumbnail_dir=thumbnail_dir,
+        editing=editing_service, loaded_plugins=loaded_plugins, data_dir=data_dir, thumbnail_dir=thumbnail_dir,
         tag_images_dir=tag_images_dir, install_dir=install_dir, ffmpeg_available=ffmpeg_path is not None,
     )
