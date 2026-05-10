@@ -16,6 +16,16 @@ from typing import Any
 _log = logging.getLogger(__name__)
 _THUMBNAIL_TIMEOUT = 60
 
+# A thumbnail may be stored as any of these (ffmpeg writes one; the client may PUT a JPEG/PNG).
+THUMBNAIL_EXTENSIONS: tuple[str, ...] = (".webp", ".jpg", ".png")
+
+
+def purge_asset_thumbnails(directory: Path, asset_id: int) -> None:
+    """Delete every thumbnail file for ``asset_id`` so at most one survives -- called before
+    (re)generating one and when an asset is deleted, so stale variants don't accumulate."""
+    for ext in THUMBNAIL_EXTENSIONS:
+        (directory / f"{asset_id}{ext}").unlink(missing_ok=True)
+
 
 class FfmpegThumbnailer:
     available = True
