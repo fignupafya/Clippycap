@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { AssetDetail, AssetSummary, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, Source, Tag } from './lib/api';
 
   type Quick = 'all' | 'untagged' | 'new';
+  type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
 
   let tags = $state<Tag[]>([]);
   let tagById = $derived(new Map(tags.map((t) => [t.id, t])));
@@ -22,11 +23,50 @@
   let detail = $state<AssetDetail | null>(null);
   let scanJob = $state<{ scanned: number } | null>(null);
   let showTags = $state(false);
+  let showKeys = $state(false);
   let newTagName = $state('');
   let newTagColor = $state('#56c271');
   let videoEl = $state<HTMLVideoElement>();
   let playbackRate = $state(1);
   let generalNoteText = $state('');
+
+  // playback + editing
+  let cfg = $state<AppConfig | null>(null);
+  let editingAvailable = $state(true);
+  let curMs = $state(0);
+  let durMs = $state(0);
+  let videoVersion = $state(0);             // bump to force the <video> to reload after an in-place edit
+  let selIn = $state<number | null>(null);
+  let selOut = $state<number | null>(null);
+  let busy = $state(false);
+
+  function getNum(meta: Record<string, unknown> | undefined, key: string, fallback: number): number {
+    const v = meta?.[key];
+    return typeof v === 'number' ? v : fallback;
+  }
+  let selValid = $derived(selIn !== null && selOut !== null && selOut > selIn);
+  let fps = $derived(getNum(detail?.metadata, 'fps', 30) || 30);
+  let timelineMs = $derived(getNum(detail?.metadata, 'duration_ms', 0) || durMs || 0);
+
+  const FALLBACK_KEYS: Record<string, string> = {
+    play_pause: 'space', toggle_play_k: 'k', skip_back: 'arrowleft', skip_fwd: 'arrowright',
+    skip_back_fine: 'shift+arrowleft', skip_fwd_fine: 'shift+arrowright', frame_prev: ',', frame_next: '.',
+    add_note_at_time: 'n', sel_in: 'i', sel_out: 'o', sel_clear: 'shift+i', add_interval_note: 'shift+n',
+    seek_start: 'home', seek_end: 'end', prev_asset: 'pageup', next_asset: 'pagedown',
+  };
+  const SHORTCUT_ROWS: [string, string][] = [
+    ['play_pause', 'Play / pause'], ['skip_back', 'Skip back'], ['skip_fwd', 'Skip forward'],
+    ['skip_back_fine', 'Skip back (fine)'], ['skip_fwd_fine', 'Skip forward (fine)'],
+    ['frame_prev', 'Previous frame'], ['frame_next', 'Next frame'], ['add_note_at_time', 'Add note at current time'],
+    ['sel_in', 'Set selection IN'], ['sel_out', 'Set selection OUT'], ['sel_clear', 'Clear selection'],
+    ['add_interval_note', 'Add interval note for the selection'], ['seek_start', 'Jump to start'],
+    ['seek_end', 'Jump to end'], ['prev_asset', 'Previous clip'], ['next_asset', 'Next clip'],
+  ];
+  function binding(action: string): string { return (cfg?.keybindings?.[action] ?? FALLBACK_KEYS[action] ?? '').toLowerCase(); }
+  function skipSeconds(fine: boolean): number {
+    const v = cfg?.player?.[fine ? 'skip_seconds_fine' : 'skip_seconds'];
+    return typeof v === 'number' ? v : (fine ? 1 : 5);
+  }
 
   async function loadTags() { try { tags = await api.listTags(); } catch (e) { error = String(e); } }
   async function loadSources() { try { sources = await api.listSources(); } catch (e) { error = String(e); } }
@@ -41,10 +81,15 @@
     } catch (e) { error = String(e); } finally { loading = false; }
   }
 
-  onMount(() => { void loadTags(); void loadSources(); });
+  onMount(() => {
+    void loadTags(); void loadSources();
+    void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
+    void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
+  });
   $effect(() => { void loadAssets(); });
   $effect(() => { if (videoEl) videoEl.playbackRate = playbackRate; });
   $effect(() => { generalNoteText = detail?.general_note ?? ''; });
+  $effect(() => { if (detail) { selIn = null; selOut = null; } });   // a new (or refreshed) asset clears the selection
 
   function fmt(ms: number): string {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -60,6 +105,12 @@
   async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); }
   async function refreshDetail() { if (detail) detail = await api.getAsset(detail.id); }
   function closeDetail() { detail = null; void loadAssets(); }
+  function gotoSibling(delta: number) {
+    if (!detail) return;
+    const cur = detail;
+    const next = assets[assets.findIndex((a) => a.id === cur.id) + delta];
+    if (next) void openDetail(next);
+  }
 
   async function addSourcePrompt() {
     const path = window.prompt('Folder path to add as a source:');
@@ -101,20 +152,86 @@
     if (!detail) return;
     try { await api.setGeneralNote(detail.id, generalNoteText); } catch (e) { window.alert(String(e)); }
   }
-  async function addNoteAtNow() {
-    if (!detail || !videoEl) return;
-    const ms = Math.floor(videoEl.currentTime * 1000);
-    const body = window.prompt(`Note at ${fmt(ms)}:`);
+  async function addNote(ms: number, endMs: number | null = null) {
+    if (!detail) return;
+    const body = window.prompt(endMs === null ? `Note at ${fmt(ms)}:` : `Note for ${fmt(ms)} – ${fmt(endMs)}:`);
     if (body === null) return;
-    try { await api.addTimestampNote(detail.id, ms, body); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    try { await api.addTimestampNote(detail.id, Math.floor(ms), body, endMs === null ? undefined : Math.floor(endMs)); await refreshDetail(); }
+    catch (e) { window.alert(String(e)); }
+  }
+  function addNoteAtNow() { void addNote(curMs); }
+  function addIntervalNote() {
+    if (!selValid) { window.alert(`Set a selection first: press "${binding('sel_in')}" (in) then "${binding('sel_out')}" (out).`); return; }
+    void addNote(selIn as number, selOut as number);
   }
   async function deleteNote(id: number) {
     try { await api.deleteNote(id); await refreshDetail(); } catch (e) { window.alert(String(e)); }
   }
-  function seek(ms: number) { if (videoEl) videoEl.currentTime = ms / 1000; }
-  function nudge(seconds: number) { if (videoEl) videoEl.currentTime += seconds; }
+  function seek(ms: number) { if (videoEl) { const t = Math.max(0, ms); videoEl.currentTime = t / 1000; curMs = Math.floor(t); } }
+  function nudge(seconds: number) { if (videoEl) { videoEl.currentTime = Math.max(0, videoEl.currentTime + seconds); curMs = Math.floor(videoEl.currentTime * 1000); } }
+  function step(frames: number) { if (videoEl) { videoEl.pause(); nudge(frames / fps); } }
+  function togglePlay() { if (videoEl) { if (videoEl.paused) void videoEl.play(); else videoEl.pause(); } }
+  function setIn() { selIn = curMs; if (selOut !== null && selOut <= selIn) selOut = null; }
+  function setOut() { selOut = curMs; if (selIn !== null && selIn >= selOut) selIn = null; }
+  function clearSel() { selIn = null; selOut = null; }
+  function pct(ms: number): number { return timelineMs ? Math.max(0, Math.min(100, (ms / timelineMs) * 100)) : 0; }
+  function timelineClick(e: MouseEvent) {
+    if (!timelineMs) return;
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    seek(((e.clientX - r.left) / r.width) * timelineMs);
+  }
+  async function doEdit(kind: EditKind) {
+    if (!detail || !selValid || busy) return;
+    const id = detail.id, s = selIn as number, o = selOut as number;
+    const span = `${fmt(s)} – ${fmt(o)}`;
+    if (kind === 'trim' && !window.confirm(`Permanently shorten this clip to keep only ${span}? There is no undo.`)) return;
+    if (kind === 'remove' && !window.confirm(`Permanently cut ${span} out of this clip? There is no undo.`)) return;
+    if (kind === 'cut' && !window.confirm(`Save ${span} as a new clip AND cut it out of this clip? The cut has no undo.`)) return;
+    busy = true;
+    try {
+      if (kind === 'trim') await api.trimAsset(id, s, o);
+      else if (kind === 'remove') await api.removeSegment(id, s, o);
+      else { const made = await api.extractSegment(id, s, o, kind === 'cut'); window.alert(`Saved as a new clip: ${made.title}`); }
+      clearSel();
+      videoVersion += 1;
+      await refreshDetail();
+      await loadAssets();
+    } catch (e) { window.alert(String(e)); } finally { busy = false; }
+  }
+
+  function inEditable(el: EventTarget | null): boolean {
+    const t = el as HTMLElement | null;
+    return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  }
+  function keyName(e: KeyboardEvent): string {
+    const mods: string[] = [];
+    if (e.ctrlKey) mods.push('ctrl');
+    if (e.shiftKey) mods.push('shift');
+    if (e.altKey) mods.push('alt');
+    return [...mods, e.key === ' ' ? 'space' : e.key].join('+').toLowerCase();
+  }
+  function onKey(e: KeyboardEvent) {
+    if (!detail || inEditable(e.target)) return;
+    if (e.key === 'Escape') { closeDetail(); return; }
+    const k = keyName(e);
+    const actions: [string, () => void][] = [
+      [binding('play_pause'), togglePlay], [binding('toggle_play_k'), togglePlay],
+      [binding('skip_back'), () => nudge(-skipSeconds(false))], [binding('skip_fwd'), () => nudge(skipSeconds(false))],
+      [binding('skip_back_fine'), () => nudge(-skipSeconds(true))], [binding('skip_fwd_fine'), () => nudge(skipSeconds(true))],
+      [binding('frame_prev'), () => step(-1)], [binding('frame_next'), () => step(1)],
+      [binding('add_note_at_time'), addNoteAtNow], [binding('add_interval_note'), addIntervalNote],
+      [binding('sel_in'), setIn], [binding('sel_out'), setOut], [binding('sel_clear'), clearSel],
+      [binding('seek_start'), () => seek(0)], [binding('seek_end'), () => seek(timelineMs)],
+      [binding('prev_asset'), () => gotoSibling(-1)], [binding('next_asset'), () => gotoSibling(1)],
+    ];
+    for (const [bind, run] of actions) {
+      if (bind && bind === k) { e.preventDefault(); run(); return; }
+    }
+  }
   function hideBrokenImg(e: Event) { (e.currentTarget as HTMLImageElement).style.display = 'none'; }
 </script>
+
+<svelte:window onkeydown={onKey} />
 
 <div class="app">
   <header>
@@ -187,22 +304,62 @@
   <div class="overlay">
     <div class="otop">
       <button class="btn sm" onclick={closeDetail}>← Library</button>
+      <button class="btn sm" onclick={() => gotoSibling(-1)} title="Previous clip ({binding('prev_asset')})">‹</button>
+      <button class="btn sm" onclick={() => gotoSibling(1)} title="Next clip ({binding('next_asset')})">›</button>
       <div class="otitle">{d.title}</div>
+      <span style:flex="1"></span>
+      <button class="btn sm" onclick={() => (showKeys = true)} title="Keyboard shortcuts">⌨ Keys</button>
     </div>
     <div class="obody">
       <div class="player">
-        <video bind:this={videoEl} src={d.stream_url} controls></video>
+        <video bind:this={videoEl} src={`${d.stream_url}?v=${videoVersion}`} controls
+               ontimeupdate={() => { if (videoEl) curMs = Math.floor(videoEl.currentTime * 1000); }}
+               onloadedmetadata={() => { if (videoEl && Number.isFinite(videoEl.duration)) durMs = Math.floor(videoEl.duration * 1000); }}></video>
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <div class="timeline" onclick={timelineClick} title="Click to seek">
+          {#if selValid}<div class="sel" style:left={pct(selIn ?? 0) + '%'} style:width={(pct(selOut ?? 0) - pct(selIn ?? 0)) + '%'}></div>{/if}
+          {#each d.timestamped_notes as n (n.id)}
+            {#if n.end_timestamp_ms != null}
+              <div class="nbar" style:left={pct(n.timestamp_ms ?? 0) + '%'} style:width={Math.max(0.7, pct(n.end_timestamp_ms) - pct(n.timestamp_ms ?? 0)) + '%'} title={n.body}></div>
+            {:else}
+              <div class="ntick" style:left={pct(n.timestamp_ms ?? 0) + '%'} title={n.body}></div>
+            {/if}
+          {/each}
+          <div class="playhead" style:left={pct(curMs) + '%'}></div>
+        </div>
         <div class="pctrl">
-          <button class="btn sm" onclick={() => nudge(-5)}>« 5s</button>
-          <button class="btn sm" onclick={() => nudge(-1 / 30)}>⟨ frame</button>
-          <button class="btn sm" onclick={() => nudge(1 / 30)}>frame ⟩</button>
-          <button class="btn sm" onclick={() => nudge(5)}>5s »</button>
+          <button class="btn sm" onclick={() => nudge(-skipSeconds(false))} title="back {skipSeconds(false)}s ({binding('skip_back')})">« {skipSeconds(false)}s</button>
+          <button class="btn sm" onclick={() => nudge(-skipSeconds(true))} title="back {skipSeconds(true)}s ({binding('skip_back_fine')})">‹ {skipSeconds(true)}s</button>
+          <button class="btn sm" onclick={() => step(-1)} title="back 1 frame ({binding('frame_prev')})">⟨ frame</button>
+          <button class="btn sm" onclick={togglePlay} title="play / pause ({binding('play_pause')})">⏯</button>
+          <button class="btn sm" onclick={() => step(1)} title="forward 1 frame ({binding('frame_next')})">frame ⟩</button>
+          <button class="btn sm" onclick={() => nudge(skipSeconds(true))} title="forward {skipSeconds(true)}s ({binding('skip_fwd_fine')})">{skipSeconds(true)}s ›</button>
+          <button class="btn sm" onclick={() => nudge(skipSeconds(false))} title="forward {skipSeconds(false)}s ({binding('skip_fwd')})">{skipSeconds(false)}s »</button>
           <label>Speed
             <select bind:value={playbackRate}>
               {#each [0.1, 0.25, 0.5, 1, 1.5, 2] as r}<option value={r}>{r}×</option>{/each}
             </select>
           </label>
-          <button class="btn sm" onclick={addNoteAtNow}>+ note @ now</button>
+          <span class="time">{fmt(curMs)} / {fmt(timelineMs)}</span>
+          <button class="btn sm" onclick={addNoteAtNow} title="note at current time ({binding('add_note_at_time')})">+ note @ now</button>
+        </div>
+        <div class="trim">
+          <button class="btn sm" onclick={setIn} title="set selection IN here ({binding('sel_in')})">⟦ in @ {fmt(curMs)}</button>
+          <button class="btn sm" onclick={setOut} title="set selection OUT here ({binding('sel_out')})">out @ {fmt(curMs)} ⟧</button>
+          {#if selIn !== null || selOut !== null}
+            <span class="seltext">selection {selIn !== null ? fmt(selIn) : '—'} – {selOut !== null ? fmt(selOut) : '—'}{selValid ? ` (${fmt((selOut as number) - (selIn as number))})` : ''}</span>
+            <button class="btn sm" onclick={clearSel}>clear</button>
+          {/if}
+          {#if selValid}
+            <button class="btn sm" disabled={busy} onclick={addIntervalNote} title="note covering the selection ({binding('add_interval_note')})">+ interval note</button>
+            {#if editingAvailable}
+              <span style:flex="1"></span>
+              <button class="btn sm" disabled={busy} onclick={() => doEdit('extract')}>save as new clip</button>
+              <button class="btn sm" disabled={busy} onclick={() => doEdit('cut')}>cut to new clip</button>
+              <button class="btn sm" disabled={busy} onclick={() => doEdit('remove')}>remove selection</button>
+              <button class="btn sm primary" disabled={busy} onclick={() => doEdit('trim')}>✂ trim to selection</button>
+            {:else}<span class="faint">trimming / cutting needs ffmpeg</span>{/if}
+          {/if}
         </div>
       </div>
       <div class="side">
@@ -224,7 +381,7 @@
         <h4>Timestamped notes</h4>
         {#each d.timestamped_notes as n (n.id)}
           <div class="tsn">
-            <button class="ts" onclick={() => seek(n.timestamp_ms ?? 0)}>{fmt(n.timestamp_ms ?? 0)}</button>
+            <button class="ts" onclick={() => seek(n.timestamp_ms ?? 0)}>{n.end_timestamp_ms != null ? `${fmt(n.timestamp_ms ?? 0)}–${fmt(n.end_timestamp_ms)}` : fmt(n.timestamp_ms ?? 0)}</button>
             <span class="body">{n.body}</span>
             <button class="x" onclick={() => deleteNote(n.id)}>🗑</button>
           </div>
@@ -239,7 +396,26 @@
   </div>
 {/if}
 
+{#if showKeys}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) showKeys = false; }}>
+    <div class="modal">
+      <div class="mtop"><h3>Keyboard shortcuts</h3><span style:flex="1"></span><button class="btn sm" onclick={() => (showKeys = false)}>Close</button></div>
+      <div class="mbody">
+        <table class="keys"><tbody>
+          {#each SHORTCUT_ROWS as [action, label] (action)}
+            <tr><td><kbd>{binding(action) || '—'}</kbd></td><td>{label}</td></tr>
+          {/each}
+          <tr><td><kbd>esc</kbd></td><td>Close the clip</td></tr>
+        </tbody></table>
+        <p class="faint" style:margin-top="10px" style:font-size="12px">From <code>[keybindings]</code> in the config — edit it there to change these.</p>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if showTags}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) showTags = false; }}>
     <div class="modal">
       <div class="mtop"><h3>Tags</h3><span style:flex="1"></span><button class="btn sm" onclick={() => (showTags = false)}>Close</button></div>
@@ -320,4 +496,16 @@
   .mbody { padding: 14px 16px; overflow-y: auto; }
   .trow { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
   .trow .sw { width: 16px; height: 16px; border-radius: 4px; border: 2px solid rgba(255,255,255,.13); flex: none; }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .timeline { position: relative; height: 16px; background: var(--bg-2); border-radius: 5px; cursor: pointer; flex: none; overflow: hidden; }
+  .timeline .sel { position: absolute; top: 0; bottom: 0; background: rgba(255,106,43,.22); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+  .timeline .nbar { position: absolute; top: 3px; bottom: 3px; background: rgba(240,179,79,.55); border-radius: 2px; }
+  .timeline .ntick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--amber); }
+  .timeline .playhead { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 5px rgba(255,255,255,.7); pointer-events: none; }
+  .trim { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+  .trim .seltext { font-family: ui-monospace, monospace; font-size: 11.5px; font-weight: 700; color: var(--amber); }
+  .pctrl .time { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--text-2); }
+  .keys { border-collapse: collapse; width: 100%; }
+  .keys td { padding: 3px 12px 3px 0; font-size: 12.5px; vertical-align: top; }
+  kbd { font-family: ui-monospace, monospace; font-size: 11px; background: var(--bg-3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 </style>

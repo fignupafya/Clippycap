@@ -52,7 +52,7 @@ def test_loads_shipped_default(tmp_path: Path) -> None:
     assert cfg.identity.strategy == "blake3"
     assert cfg.media.ffmpeg.enabled is True
     assert "mp4" in cfg.media.video.extensions
-    assert len(cfg.seed.reference_types) == 4
+    assert len(cfg.seed.reference_types) == 5
     assert cfg.ui.default_sort in cfg.sort
     assert cfg.player.default_speed in cfg.player.speeds
 

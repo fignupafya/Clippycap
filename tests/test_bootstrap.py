@@ -26,7 +26,7 @@ def test_build_application_is_fully_wired(tmp_path: Path) -> None:
         assert app.data_dir.is_dir() and app.thumbnail_dir.is_dir() and app.tag_images_dir.is_dir()
         assert (app.data_dir / "library.sqlite").is_file()
         assert [rt.name for rt in app.reference_types.list_all()] == [
-            "better version of", "same mistake as", "see also", "continues from",
+            "better version of", "same mistake as", "see also", "continues from", "excerpt of",
         ]
         assert app.tags.list_all() == []
         assert app.assets.list_assets(filter=AssetFilter(), sort_key="added_desc", offset=0, limit=10).total == 0
@@ -42,6 +42,6 @@ def test_build_application_is_idempotent_on_first_run(tmp_path: Path) -> None:
     build_application(**common).shutdown()
     second = build_application(**common)   # second build must not re-seed or fail
     try:
-        assert len(second.reference_types.list_all()) == 4
+        assert len(second.reference_types.list_all()) == 5
     finally:
         second.shutdown()

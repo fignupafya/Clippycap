@@ -106,6 +106,7 @@ def _note(r: sqlite3.Row) -> Note:
         asset_id=r["asset_id"],
         body=r["body"],
         timestamp_ms=r["timestamp_ms"],
+        end_timestamp_ms=r["end_timestamp_ms"],
         created_at=_from_iso(r["created_at"]),
         updated_at=_from_iso(r["updated_at"]),
         id=r["id"],
@@ -183,11 +184,15 @@ class SqliteAssetRepository(_Repo):
         return _asset(row) if row else None
 
     def update(self, asset: Asset) -> None:
-        self._c.execute(
-            "UPDATE assets SET media_type=?, title=?, size_bytes=?, metadata_json=?, last_opened_at=? WHERE id=?",
-            (asset.media_type, asset.title, asset.size_bytes, json.dumps(asset.metadata),
-             _iso_or_none(asset.last_opened_at), asset.id),
-        )
+        try:
+            self._c.execute(
+                "UPDATE assets SET identity_hash=?, media_type=?, title=?, size_bytes=?, metadata_json=?, "
+                "last_opened_at=? WHERE id=?",
+                (asset.identity_hash, asset.media_type, asset.title, asset.size_bytes,
+                 json.dumps(asset.metadata), _iso_or_none(asset.last_opened_at), asset.id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError(f"another asset already has identity {asset.identity_hash!r}") from exc
 
     def delete(self, asset_id: int) -> None:
         self._c.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
@@ -402,8 +407,9 @@ class SqliteNoteRepository(_Repo):
         now = _now()
         try:
             cur = self._c.execute(
-                "INSERT INTO notes(asset_id, body, timestamp_ms, created_at, updated_at) VALUES (?,?,?,?,?)",
-                (note.asset_id, note.body, note.timestamp_ms, now, now),
+                "INSERT INTO notes(asset_id, body, timestamp_ms, end_timestamp_ms, created_at, updated_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (note.asset_id, note.body, note.timestamp_ms, note.end_timestamp_ms, now, now),
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError("this asset already has a general note") from exc
@@ -420,6 +426,12 @@ class SqliteNoteRepository(_Repo):
         now = _now()
         self._c.execute("UPDATE notes SET body = ?, updated_at = ? WHERE id = ?", (note.body, now, note.id))
         note.updated_at = _from_iso(now)
+
+    def retime(self, note_id: int, timestamp_ms: int | None, end_timestamp_ms: int | None) -> None:
+        self._c.execute(
+            "UPDATE notes SET timestamp_ms = ?, end_timestamp_ms = ?, updated_at = ? WHERE id = ?",
+            (timestamp_ms, end_timestamp_ms, _now(), note_id),
+        )
 
     def delete(self, note_id: int) -> None:
         self._c.execute("DELETE FROM notes WHERE id = ?", (note_id,))

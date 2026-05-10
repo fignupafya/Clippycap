@@ -116,6 +116,22 @@ pause_on_add_note = true
 # Frame stepping: if true, use requestVideoFrameCallback when available; else seek by 1/fps.
 prefer_rvfc       = true
 
+[editing]
+# Trimming / cutting clips with ffmpeg. By default ffmpeg cuts at keyframes — instant and lossless,
+# but the cut point may land up to a GOP (~1–2 s) early. Set reencode=true for frame-accurate cuts
+# (re-encodes the result => slower, with a small quality cost).
+reencode               = false
+reencode_crf           = 18           # 0–51, lower = better quality (only when reencode=true)
+reencode_preset        = "veryfast"
+# Trim / "remove segment" / "cut segment" overwrite the ORIGINAL file in place (there is no undo).
+# When true, a copy of the pre-edit file is kept next to it first ("<name> (pre-edit backup)<ext>").
+keep_original_backup   = false
+# Name for the new clip produced by "save segment as new clip" / "cut segment to new clip".
+# Placeholders: {stem} {start} {end} {ext}  — {start} and {end} are formatted "mm-ss".
+new_clip_name_template = "{stem} [{start}-{end}]{ext}"
+# Reference type (by name) that links an extracted clip back to its source clip; "" disables it.
+excerpt_reference_type = "excerpt of"
+
 [keybindings]
 # Player (in the Detail view)
 play_pause        = "Space"
@@ -137,6 +153,13 @@ add_note_at_time  = "n"
 capture_frame     = "shift+s"
 prev_asset        = "PageUp"
 next_asset        = "PageDown"
+seek_start        = "Home"
+seek_end          = "End"
+# Trimming / selection (in the Detail view)
+sel_in            = "i"            # set the selection IN point at the current time
+sel_out           = "o"            # set the selection OUT point at the current time
+sel_clear         = "shift+i"      # clear the current selection
+add_interval_note = "shift+n"      # add a note covering the current selection
 # App
 focus_search      = "ctrl+k"
 open_tag_manager  = "ctrl+t"
@@ -187,6 +210,10 @@ color   = "#4fb6f0"
 name    = "continues from"
 reverse = "continued in"
 color   = "#b78bf0"
+[[seed.reference_types]]
+name    = "excerpt of"
+reverse = "has excerpt"
+color   = "#f0a64f"
 
 [firstrun]
 # On first run, offer to add these folders as sources (existing ones only; the user confirms).

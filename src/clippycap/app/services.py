@@ -264,12 +264,18 @@ class NoteService:
         )
         return NoteView(note=note, tag_ids=tag_ids)
 
-    def add_timestamped(self, asset_id: int, timestamp_ms: int, body: str) -> NoteView:
+    def add_timestamped(
+        self, asset_id: int, timestamp_ms: int, body: str, *, end_timestamp_ms: int | None = None
+    ) -> NoteView:
         if timestamp_ms < 0:
             raise InvalidInputError("timestamp_ms must be >= 0")
+        if end_timestamp_ms is not None and end_timestamp_ms <= timestamp_ms:
+            raise InvalidInputError("end_timestamp_ms must be greater than timestamp_ms")
         with self._db.transaction() as uow:
             _require(uow.assets.get(asset_id), "asset", asset_id)
-            note = uow.notes.add(Note(asset_id=asset_id, body=body, timestamp_ms=timestamp_ms))
+            note = uow.notes.add(Note(
+                asset_id=asset_id, body=body, timestamp_ms=timestamp_ms, end_timestamp_ms=end_timestamp_ms,
+            ))
         assert note.id is not None
         self._bus.publish(NoteCreated(note_id=note.id, asset_id=asset_id))
         return NoteView(note=note, tag_ids=[])

@@ -30,7 +30,7 @@ def test_health_and_empty_library(tmp_path: Path) -> None:
     assert client.get("/api/assets").json() == {"items": [], "total": 0, "offset": 0, "limit": 100}
     assert client.get("/api/tags").json() == []
     assert [rt["name"] for rt in client.get("/api/reference-types").json()] == [
-        "better version of", "same mistake as", "see also", "continues from",
+        "better version of", "same mistake as", "see also", "continues from", "excerpt of",
     ]
 
 
