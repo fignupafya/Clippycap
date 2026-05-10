@@ -39,6 +39,7 @@
   let selIn = $state<number | null>(null);
   let selOut = $state<number | null>(null);
   let busy = $state(false);
+  let exactFrameTime = 0;          // exact PTS (s) of the displayed frame, from requestVideoFrameCallback
 
   function getNum(meta: Record<string, unknown> | undefined, key: string, fallback: number): number {
     const v = meta?.[key];
@@ -90,6 +91,7 @@
   $effect(() => { if (videoEl) videoEl.playbackRate = playbackRate; });
   $effect(() => { generalNoteText = detail?.general_note ?? ''; });
   $effect(() => { if (detail) { selIn = null; selOut = null; } });   // a new (or refreshed) asset clears the selection
+  $effect(() => { if (videoEl) trackFrameTime(videoEl); });
 
   function fmt(ms: number): string {
     const s = Math.max(0, Math.floor(ms / 1000));
@@ -159,7 +161,7 @@
     try { await api.addTimestampNote(detail.id, Math.floor(ms), body, endMs === null ? undefined : Math.floor(endMs)); await refreshDetail(); }
     catch (e) { window.alert(String(e)); }
   }
-  function addNoteAtNow() { void addNote(curMs); }
+  function addNoteAtNow() { void addNote(frameNowMs()); }
   function addIntervalNote() {
     if (!selValid) { window.alert(`Set a selection first: press "${binding('sel_in')}" (in) then "${binding('sel_out')}" (out).`); return; }
     void addNote(selIn as number, selOut as number);
@@ -167,12 +169,27 @@
   async function deleteNote(id: number) {
     try { await api.deleteNote(id); await refreshDetail(); } catch (e) { window.alert(String(e)); }
   }
-  function seek(ms: number) { if (videoEl) { const t = Math.max(0, ms); videoEl.currentTime = t / 1000; curMs = Math.floor(t); } }
+  // Adding ~half a frame keeps the seek target solidly inside that frame's presentation window, so
+  // millisecond rounding (in the stored timestamp, or after a trim's shift) can't land us a frame early.
+  function frameNudge(): number { return Math.min(0.5 / Math.max(1, fps), 0.05); }
+  function seek(ms: number) { if (videoEl) { const t = Math.max(0, ms); videoEl.currentTime = t / 1000 + frameNudge(); curMs = Math.floor(t); } }
   function nudge(seconds: number) { if (videoEl) { videoEl.currentTime = Math.max(0, videoEl.currentTime + seconds); curMs = Math.floor(videoEl.currentTime * 1000); } }
   function step(frames: number) { if (videoEl) { videoEl.pause(); nudge(frames / fps); } }
+  function trackFrameTime(el: HTMLVideoElement) {
+    if (typeof el.requestVideoFrameCallback !== 'function') return;
+    const onFrame = (_now: number, meta: { mediaTime: number }) => {
+      exactFrameTime = meta.mediaTime;
+      el.requestVideoFrameCallback(onFrame);
+    };
+    el.requestVideoFrameCallback(onFrame);
+  }
+  function frameNowMs(): number {
+    const haveExact = videoEl != null && typeof videoEl.requestVideoFrameCallback === 'function' && exactFrameTime > 0;
+    return Math.round((haveExact ? exactFrameTime : (videoEl?.currentTime ?? 0)) * 1000);
+  }
   function togglePlay() { if (videoEl) { if (videoEl.paused) void videoEl.play(); else videoEl.pause(); } }
-  function setIn() { selIn = curMs; if (selOut !== null && selOut <= selIn) selOut = null; }
-  function setOut() { selOut = curMs; if (selIn !== null && selIn >= selOut) selIn = null; }
+  function setIn() { selIn = frameNowMs(); if (selOut !== null && selOut <= selIn) selOut = null; }
+  function setOut() { selOut = frameNowMs(); if (selIn !== null && selIn >= selOut) selIn = null; }
   function clearSel() { selIn = null; selOut = null; }
   function pct(ms: number): number { return timelineMs ? Math.max(0, Math.min(100, (ms / timelineMs) * 100)) : 0; }
   function timelineClick(e: MouseEvent) {

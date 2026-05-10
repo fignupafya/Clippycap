@@ -33,7 +33,10 @@ class FfmpegVideoEditor:
 
     def _codec_args(self) -> list[str]:
         if self._reencode:
-            return ["-c:v", "libx264", "-crf", str(self._crf), "-preset", self._preset, "-c:a", "aac"]
+            # passthrough keeps each frame's source timestamp, so the cut's frame timing matches the
+            # original exactly (timestamped notes line up after a trim).
+            return ["-c:v", "libx264", "-crf", str(self._crf), "-preset", self._preset,
+                    "-fps_mode:v", "passthrough", "-c:a", "aac"]
         return ["-c", "copy"]
 
     def _seek_in(self, seconds: float) -> list[str]:
