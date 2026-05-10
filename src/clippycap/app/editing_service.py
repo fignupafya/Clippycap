@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from clippycap.core.entities import Asset, Reference
-from clippycap.core.errors import InvalidInputError, NotFoundError, UnsupportedError
+from clippycap.core.errors import ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.events import AssetUpdated, EventBus
 from clippycap.core.ports import Database, IdentityStrategy, MediaTypeProvider, UnitOfWork, VideoEditor
 from clippycap.infra.config import Config
@@ -126,10 +126,19 @@ class EditingService:
             if not edit(path, tmp, start_ms=start_ms, end_ms=end_ms):
                 tmp.unlink(missing_ok=True)
                 raise UnsupportedError("the video edit failed -- see the logs")
+            # Identify the result *before* touching the original, so a collision leaves the file intact.
+            new_hash = self._strategy(provider.identity_strategy_name).compute(tmp, tmp.stat().st_size)
+            clash = uow.assets.get_by_hash(new_hash)
+            if clash is not None and clash.id != asset_id:
+                tmp.unlink(missing_ok=True)
+                raise ConflictError(
+                    f"the edited clip would be byte-identical to clip #{clash.id} ({clash.title!r}); "
+                    "nothing was changed"
+                )
             if self._config.editing.keep_original_backup:
                 shutil.copy2(path, path.with_name(f"{path.stem} (pre-edit backup){path.suffix}"))
             tmp.replace(path)
-            self._refresh_file(uow, asset, path, provider)
+            self._refresh_file(uow, asset, path, provider, identity_hash=new_hash)
             self._shift_notes(uow, asset_id, start_ms, end_ms, mode)
         self._bus.publish(AssetUpdated(asset_id=asset_id))
         with self._db.transaction() as uow:
@@ -137,13 +146,15 @@ class EditingService:
         assert refreshed is not None
         return refreshed
 
-    def _refresh_file(self, uow: UnitOfWork, asset: Asset, path: Path, provider: MediaTypeProvider) -> None:
+    def _refresh_file(
+        self, uow: UnitOfWork, asset: Asset, path: Path, provider: MediaTypeProvider, *, identity_hash: str
+    ) -> None:
         st = path.stat()
-        asset.identity_hash = self._strategy(provider.identity_strategy_name).compute(path, st.st_size)
+        asset.identity_hash = identity_hash
         asset.size_bytes = st.st_size
         asset.metadata = {**asset.metadata, **provider.extract_metadata(path)}
-        uow.assets.update(asset)
-        uow.hash_cache.put(str(path), st.st_size, st.st_mtime_ns, asset.identity_hash)
+        uow.assets.update(asset)                                          # update() now also writes identity_hash
+        uow.hash_cache.put(str(path), st.st_size, st.st_mtime_ns, identity_hash)  # so re-scans stay consistent
         if asset.id is not None:
             thumb = self._thumb_dir / f"{asset.id}.{self._config.thumbnails.format}"
             thumb.unlink(missing_ok=True)
