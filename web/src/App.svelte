@@ -188,15 +188,17 @@
     if (kind === 'remove' && !window.confirm(`Permanently cut ${span} out of this clip? There is no undo.`)) return;
     if (kind === 'cut' && !window.confirm(`Save ${span} as a new clip AND cut it out of this clip? The cut has no undo.`)) return;
     busy = true;
+    const touchesSource = kind !== 'extract';                          // 'extract' only writes a new file
+    if (touchesSource && videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }  // release the file
     try {
+      if (touchesSource) await new Promise<void>((r) => setTimeout(r, 250));   // let the backend close its stream handle
       if (kind === 'trim') await api.trimAsset(id, s, o);
       else if (kind === 'remove') await api.removeSegment(id, s, o);
       else { const made = await api.extractSegment(id, s, o, kind === 'cut'); window.alert(`Saved as a new clip: ${made.title}`); }
       clearSel();
-      videoVersion += 1;
       await refreshDetail();
       await loadAssets();
-    } catch (e) { window.alert(String(e)); } finally { busy = false; }
+    } catch (e) { window.alert(String(e)); } finally { videoVersion += 1; busy = false; }
   }
 
   function inEditable(el: EventTarget | null): boolean {
