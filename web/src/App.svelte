@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, ReferenceType, ReferenceView, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, ReferenceView, Source, Tag } from './lib/api';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
@@ -32,15 +32,18 @@
 
   let detail = $state<AssetDetail | null>(null);
   let refs = $state<{ outgoing: ReferenceView[]; incoming: ReferenceView[] }>({ outgoing: [], incoming: [] });
-  let refTypes = $state<ReferenceType[]>([]);
   let addingRef = $state(false);
   let refClipQuery = $state('');
-  let refTypeId = $state('');
+  let refPickedId = $state<number | null>(null);
+  let refPickedTitle = $state('');
+  let refDesc = $state('');
   let editingTitle = $state(false);
   let titleDraft = $state('');
   let titleInputEl = $state<HTMLInputElement>();
   let mention = $state<{ el: HTMLTextAreaElement; queryStart: number; query: string; top: number; left: number; set: (s: string) => void } | null>(null);
   let mentionPopup = $state<{ id: number; title: string; top: number; left: number } | null>(null);
+  let mentionIndex = $state(0);
+  let mentionMatches = $derived(mention ? assets.filter((a) => a.title.toLowerCase().includes(mention.query)).slice(0, 8) : []);
   let editingGeneralNote = $state(false);
   let generalNoteEl = $state<HTMLTextAreaElement>();
   let editNoteBodyId = $state<number | null>(null);
@@ -157,7 +160,7 @@
     void loadTags(); void loadSources();
     void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
     void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
-    void api.listReferenceTypes().then((t) => { refTypes = t; }).catch(() => { /* none */ });
+    void syncFromHash();   // open the clip in the URL hash, if any
   });
   $effect(() => { void loadAssets(); });
   $effect(() => { if (videoEl) videoEl.playbackRate = playbackRate; });
@@ -214,13 +217,35 @@
     await bulkRun('deleted', (id) => api.deleteAsset(id, true));
   }
   async function loadRefs() { if (!detail) { refs = { outgoing: [], incoming: [] }; return; } try { refs = await api.getReferences(detail.id); } catch { /* ignore */ } }
-  async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); editingTitle = false; addingRef = false; await loadRefs(); }
-  async function openClip(id: number) { try { detail = await api.getAsset(id); void api.markOpened(id); editingTitle = false; addingRef = false; await loadRefs(); } catch (e) { toast(String(e), 'error'); } }
+  // routing via the URL hash (#clip/<id>) so the browser's back/forward work
+  function navTo(id: number | null) {
+    const h = id == null ? '' : 'clip/' + id;
+    if (location.hash.replace(/^#/, '') !== h) location.hash = h; else void syncFromHash();
+  }
+  async function syncFromHash() {
+    mention = null; mentionPopup = null; tagDropdownNoteId = null; editNoteBodyId = null;
+    editingGeneralNote = false; editingTitle = false; addingRef = false;
+    const m = /^#?clip\/(\d+)$/.exec(location.hash);
+    if (m) {
+      const id = Number(m[1]);
+      if (detail?.id === id) return;
+      const want = location.hash;
+      try {
+        const d = await api.getAsset(id);
+        if (location.hash !== want) return;                 // a faster navigation won the race
+        detail = d; void api.markOpened(id); await loadRefs();
+      } catch (e) { detail = null; refs = { outgoing: [], incoming: [] }; toast(String(e), 'error'); }
+    } else if (detail !== null) {
+      detail = null; refs = { outgoing: [], incoming: [] }; void loadAssets();
+    }
+  }
+  function openDetail(a: AssetSummary) { navTo(a.id); }
+  function openClip(id: number) { navTo(id); }
+  function closeDetail() { navTo(null); }
   async function refreshDetail() { if (detail) { detail = await api.getAsset(detail.id); await loadRefs(); } }
-  function closeDetail() { detail = null; refs = { outgoing: [], incoming: [] }; editingTitle = false; addingRef = false; void loadAssets(); }
-  async function addRef(toId: number) {
-    if (!detail) return;
-    try { await api.addReference({ from_asset_id: detail.id, to_asset_id: toId, type_id: refTypeId ? Number(refTypeId) : null }); addingRef = false; refClipQuery = ''; await loadRefs(); } catch (e) { toast(String(e), 'error'); }
+  async function addRef() {
+    if (!detail || refPickedId === null) return;
+    try { await api.addReference({ from_asset_id: detail.id, to_asset_id: refPickedId, note: refDesc.trim() || undefined }); addingRef = false; refPickedId = null; refDesc = ''; refClipQuery = ''; await loadRefs(); } catch (e) { toast(String(e), 'error'); }
   }
   async function deleteRef(id: number) { try { await api.deleteReference(id); await loadRefs(); } catch (e) { toast(String(e), 'error'); } }
   function startEditTitle() { if (!detail) return; titleDraft = detail.title; editingTitle = true; setTimeout(() => titleInputEl?.focus(), 0); }
@@ -344,6 +369,15 @@
     if (!m) { mention = null; return; }
     const c = caretCoords(el);
     mention = { el, queryStart: caret - m[1].length - 1, query: m[1].toLowerCase(), top: c.top, left: c.left, set };
+    mentionIndex = 0;
+  }
+  function onMentionKey(e: KeyboardEvent): boolean {
+    if (!mention) return false;
+    if (e.key === 'ArrowDown') { e.preventDefault(); mentionIndex = Math.min(mentionIndex + 1, Math.max(0, mentionMatches.length - 1)); return true; }
+    if (e.key === 'ArrowUp') { e.preventDefault(); mentionIndex = Math.max(0, mentionIndex - 1); return true; }
+    if (e.key === 'Enter') { e.preventDefault(); const p = mentionMatches[Math.min(mentionIndex, mentionMatches.length - 1)]; if (p) pickMention(p.id); return true; }
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeMention(); return true; }
+    return false;
   }
   function pickMention(clipId: number) {
     if (!mention) return;
@@ -609,7 +643,7 @@
   function hideBrokenImg(e: Event) { (e.currentTarget as HTMLImageElement).style.display = 'none'; }
 </script>
 
-<svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} onpointerdown={onWindowPointerDown} />
+<svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} onpointerdown={onWindowPointerDown} onhashchange={syncFromHash} />
 
 <div class="app">
   <header>
@@ -792,7 +826,7 @@
         {#if editingGeneralNote}
           <textarea class="field" rows="5" bind:value={generalNoteText} bind:this={generalNoteEl}
                     oninput={(e) => onMentionInput(e, (s) => { generalNoteText = s; })}
-                    onkeydown={(e) => { if (e.key === 'Escape') { if (mention) closeMention(); else { editingGeneralNote = false; void saveGeneralNote(); } } }}
+                    onkeydown={(e) => { if (onMentionKey(e)) return; if (e.key === 'Escape') { editingGeneralNote = false; void saveGeneralNote(); } }}
                     onblur={() => { if (!mention) { editingGeneralNote = false; void saveGeneralNote(); } }}></textarea>
         {:else}
           <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -827,7 +861,7 @@
             {#if editNoteBodyId === n.id}
               <textarea class="field notebody-edit" rows="2" bind:value={noteBodyDraft}
                         oninput={(e) => onMentionInput(e, (s) => { noteBodyDraft = s; })}
-                        onkeydown={(e) => { if (e.key === 'Escape') { if (mention) closeMention(); else editNoteBodyId = null; } else if (e.key === 'Enter' && !e.shiftKey && !mention) { e.preventDefault(); void saveNoteBody(n.id); } }}></textarea>
+                        onkeydown={(e) => { if (onMentionKey(e)) return; if (e.key === 'Escape') editNoteBodyId = null; else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void saveNoteBody(n.id); } }}></textarea>
               <button class="x" onclick={() => saveNoteBody(n.id)} title="save">✔</button>
               <button class="x" onclick={() => (editNoteBodyId = null)} title="cancel">×</button>
             {:else}
@@ -847,33 +881,35 @@
           {/if}
         {/each}
         {#if d.timestamped_notes.length === 0}<span class="faint">none yet — use “+ note @ now”</span>{/if}
-        <h4>References</h4>
-        {#each [...refs.outgoing.map((r) => ({ r, dir: '→' })), ...refs.incoming.map((r) => ({ r, dir: '←' }))] as { r, dir } (dir + r.id)}
-          <div class="refrow">
-            <span class="refdir">{dir}</span>
-            {#if r.type_name}<span class="reftype">{r.type_name}</span>{/if}
-            <button class="reflink" onclick={() => openClip(r.other_asset_id)} title="open this clip">{r.other_asset_title}</button>
-            {#if r.from_timestamp_ms != null}<span class="faint" style:font-size="10.5px">@ {fmt(r.from_timestamp_ms)}</span>{/if}
-            <span style:flex="1"></span>
-            <button class="x" onclick={() => deleteRef(r.id)} title="remove this reference">×</button>
-          </div>
-        {/each}
-        {#if refs.outgoing.length === 0 && refs.incoming.length === 0 && !addingRef}<span class="faint">no references yet — add one below, or @-mention a clip inside a note.</span>{/if}
+        <h4>This clip's references</h4>
+        {#each refs.outgoing as r (r.id)}{@render refCard(r)}{/each}
+        {#if refs.outgoing.length === 0 && !addingRef}<span class="faint">none yet — add one below, or @-mention a clip in a note.</span>{/if}
         {#if addingRef}
           <div class="refadd">
-            <input class="field" placeholder="search clips…" bind:value={refClipQuery} />
-            <select bind:value={refTypeId}><option value="">— relation —</option>{#each refTypes as rt (rt.id)}<option value={rt.id}>{rt.name}</option>{/each}</select>
-            <button class="btn sm" onclick={() => { addingRef = false; refClipQuery = ''; }}>Cancel</button>
-            <div class="refadd-list">
-              {#each assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).slice(0, 14) as a (a.id)}
-                <button class="refadd-item" onclick={() => addRef(a.id)}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} /> {a.title}</button>
-              {/each}
-              {#if assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).length === 0}<div class="faint" style:padding="6px 8px" style:font-size="12px">no matching clips loaded</div>{/if}
-            </div>
+            {#if refPickedId === null}
+              <input class="field" style:width="100%" placeholder="search clips to reference…" bind:value={refClipQuery} />
+              <div class="refadd-list">
+                {#each assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).slice(0, 14) as a (a.id)}
+                  <button class="refadd-item" onclick={() => { refPickedId = a.id; refPickedTitle = a.title; }}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} />{a.title}</button>
+                {/each}
+                {#if assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).length === 0}<div class="faint" style:padding="6px 8px" style:font-size="12px">no matching clips loaded</div>{/if}
+              </div>
+              <button class="btn sm" onclick={() => { addingRef = false; refClipQuery = ''; }}>Cancel</button>
+            {:else}
+              <div class="ref-picked"><img src="/thumbnails/{refPickedId}" alt="" onerror={hideBrokenImg} /><b>{refPickedTitle}</b><button class="x" onclick={() => (refPickedId = null)} title="pick a different clip">change</button></div>
+              <textarea class="field" rows="2" placeholder="description (optional)" bind:value={refDesc}></textarea>
+              <div class="refadd-actions">
+                <button class="btn sm primary" onclick={addRef}>Add reference</button>
+                <button class="btn sm" onclick={() => { addingRef = false; refPickedId = null; refDesc = ''; refClipQuery = ''; }}>Cancel</button>
+              </div>
+            {/if}
           </div>
         {:else}
-          <button class="btn sm" style:margin-top="6px" onclick={() => { addingRef = true; refClipQuery = ''; }}>+ Add a reference</button>
+          <button class="btn sm" style:margin-top="6px" onclick={() => { addingRef = true; refPickedId = null; refDesc = ''; refClipQuery = ''; }}>+ Add a reference</button>
         {/if}
+        <h4>Clips referencing this one</h4>
+        {#each refs.incoming as r (r.id)}{@render refCard(r)}{/each}
+        {#if refs.incoming.length === 0}<span class="faint">nothing references this clip yet.</span>{/if}
         <h4>File</h4>
         {#each d.paths as p (p.path)}<div class="src" class:miss={!p.present} title={p.path}>{p.present ? '✓' : '✗'} {p.path}</div>{/each}
         <button class="btn sm" style:margin-top="7px" onclick={renameFile}>✎ Rename the file on disk</button>
@@ -901,8 +937,18 @@
 {/if}
 
 {#snippet tagFace(t: Tag)}{#if t.image_ref}<img class="tagimg" src="/api/tag-images/{t.image_ref}" alt="" />{:else if t.icon}{t.icon}{/if}{/snippet}
-{#snippet noteBody(body: string)}{#each splitMentions(body) as seg}{#if seg.id != null}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-<span class="mention" role="link" tabindex="0" onclick={() => openClip(seg.id ?? 0)} onmouseenter={(e) => showMentionPopup(e, seg.id ?? 0, seg.text)} onmouseleave={hideMentionPopup}>@{seg.text}</span>{:else}{seg.text}{/if}{/each}{/snippet}
+{#snippet noteBody(body: string)}{#each splitMentions(body) as seg}{#if seg.id != null}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions --><span class="mention" role="link" tabindex="0" onclick={() => openClip(seg.id ?? 0)} onmouseenter={(e) => showMentionPopup(e, seg.id ?? 0, seg.text)} onmouseleave={hideMentionPopup}>@{seg.text}</span>{:else}{seg.text}{/if}{/each}{/snippet}
+{#snippet refCard(r: ReferenceView)}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="ref-card" onclick={() => openClip(r.other_asset_id)} title="open this clip">
+    <img src="/thumbnails/{r.other_asset_id}" alt="" onerror={hideBrokenImg} />
+    <div class="ref-card-body">
+      <div class="ref-card-title">{r.other_asset_title}{#if r.from_timestamp_ms != null}<span class="faint" style:font-size="10.5px"> · @ {fmt(r.from_timestamp_ms)}</span>{/if}</div>
+      {#if (r.note || r.label).trim()}<div class="ref-card-desc">{(r.note || r.label).trim()}</div>{/if}
+    </div>
+    <button class="ref-card-x x" onclick={(e) => { e.stopPropagation(); deleteRef(r.id); }} title="remove this reference">×</button>
+  </div>
+{/snippet}
 {#if showSettings && cfg}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) closeSettings(); }}>
@@ -994,7 +1040,7 @@
         {#if dialog.multiline}
           <textarea class="field dlg-input" rows="3" bind:value={dialog.value} bind:this={dlgInputEl} placeholder={dialog.placeholder}
                     oninput={(e) => { if (dialog?.mentions) onMentionInput(e, (s) => { if (dialog) dialog.value = s; }); }}
-                    onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); if (mention) closeMention(); else dialogCancel(); } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !mention) { e.preventDefault(); dialogOk(); } }}></textarea>
+                    onkeydown={(e) => { if (onMentionKey(e)) return; if (e.key === 'Escape') { e.stopPropagation(); dialogCancel(); } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); dialogOk(); } }}></textarea>
         {:else}
           <input class="field dlg-input" bind:value={dialog.value} bind:this={dlgInputEl} placeholder={dialog.placeholder}
                  onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); dialogOk(); } else if (e.key === 'Escape') { e.stopPropagation(); dialogCancel(); } }} />
@@ -1018,12 +1064,11 @@
   </div>
 {/if}
 {#if mention}
-  {@const matches = assets.filter((a) => a.title.toLowerCase().includes(mention.query)).slice(0, 10)}
   <div class="mention-dropdown" style:top={mention.top + 'px'} style:left={mention.left + 'px'}>
-    {#each matches as a (a.id)}
-      <button class="mention-item" onmousedown={(e) => { e.preventDefault(); pickMention(a.id); }}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} /><span>{a.title}</span></button>
+    {#each mentionMatches as a, i (a.id)}
+      <button class="mention-item" class:on={i === mentionIndex} onmousemove={() => (mentionIndex = i)} onmousedown={(e) => { e.preventDefault(); pickMention(a.id); }}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} /><span>{a.title}</span></button>
     {/each}
-    {#if matches.length === 0}<div class="faint" style:padding="6px 8px" style:font-size="12px">no matching clips</div>{/if}
+    {#if mentionMatches.length === 0}<div class="faint" style:padding="6px 8px" style:font-size="12px">no matching clips</div>{/if}
   </div>
 {/if}
 {#if mentionPopup}
@@ -1055,12 +1100,19 @@
   .tagchip .n { font-family: ui-monospace, monospace; font-size: 10px; opacity: .6; }
   .src { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text-2); padding: 3px 0; word-break: break-all; }
   .src.miss { color: var(--text-3); text-decoration: line-through; }
-  .refrow { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 12.5px; }
-  .refdir { color: var(--text-3); font-weight: 700; flex: none; }
-  .reftype { font-size: 10.5px; color: var(--text-3); background: var(--bg-3); border-radius: 4px; padding: 1px 5px; white-space: nowrap; flex: none; }
-  .reflink { background: transparent; border: none; color: var(--accent); cursor: pointer; text-align: left; padding: 0; text-decoration: underline; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .reflink:hover { color: #ffb482; }
+  .ref-card { display: flex; gap: 10px; padding: 8px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px; cursor: pointer; transition: border-color .1s; align-items: flex-start; }
+  .ref-card:hover { border-color: #3a4350; }
+  .ref-card > img { width: 92px; aspect-ratio: 16/9; object-fit: cover; border-radius: 5px; flex: none; background: #11141a; }
+  .ref-card-body { flex: 1; min-width: 0; }
+  .ref-card-title { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ref-card-desc { font-size: 11.5px; color: var(--text-2); margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
+  .ref-card-x { flex: none; font-size: 16px; line-height: 1; }
+  .ref-picked { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 12.5px; }
+  .ref-picked img { width: 52px; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; flex: none; background: #11141a; }
+  .ref-picked b { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .refadd-actions { display: flex; gap: 6px; width: 100%; }
   .refadd { margin-top: 6px; padding: 8px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .refadd textarea { width: 100%; box-sizing: border-box; resize: vertical; font-size: 12px; }
   .refadd input.field { flex: 1; min-width: 110px; }
   .refadd select { padding: 3px 6px; background: var(--bg-1); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }
   .refadd-list { width: 100%; max-height: 210px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
@@ -1103,7 +1155,7 @@
   .side textarea { resize: vertical; }
   .tsn { display: flex; gap: 8px; align-items: flex-start; padding: 7px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; margin-bottom: 6px; }
   .tsn .ts { font-family: ui-monospace, monospace; font-size: 11.5px; font-weight: 700; color: var(--amber); background: rgba(240,179,79,.13); border: 1px solid rgba(240,179,79,.3); padding: 2px 6px; border-radius: 5px; flex: none; }
-  .tsn .body { flex: 1; font-size: 13px; word-break: break-word; }
+  .tsn .body { flex: 1; font-size: 13px; word-break: break-word; white-space: pre-wrap; }
   .note-display { white-space: pre-wrap; word-break: break-word; font-size: 13px; min-height: 44px; padding: 7px 9px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; cursor: text; line-height: 1.45; }
   .note-display:hover { border-color: #3a4350; }
   .mention { color: var(--accent); cursor: pointer; text-decoration: underline; font-weight: 600; }
@@ -1111,7 +1163,7 @@
   .notebody-edit { flex: 1; min-width: 110px; font-size: 12px; resize: vertical; }
   .mention-dropdown { position: fixed; z-index: 70; width: 240px; max-height: 240px; overflow-y: auto; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.5); padding: 4px; }
   .mention-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 4px 6px; border-radius: 5px; font-size: 12px; color: var(--text); background: transparent; border: none; cursor: pointer; }
-  .mention-item:hover { background: var(--bg-3); }
+  .mention-item:hover, .mention-item.on { background: var(--bg-3); }
   .mention-item img { width: 38px; height: 22px; object-fit: cover; border-radius: 3px; flex: none; background: #11141a; }
   .mention-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .mention-popup { position: fixed; z-index: 75; pointer-events: none; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.55); padding: 6px; width: 200px; }
