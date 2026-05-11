@@ -26,6 +26,9 @@
   let bulkBusy = $state(false);
 
   let detail = $state<AssetDetail | null>(null);
+  let editingTitle = $state(false);
+  let titleDraft = $state('');
+  let titleInputEl = $state<HTMLInputElement>();
   let scanJob = $state<{ scanned: number } | null>(null);
   let showTags = $state(false);
   let showKeys = $state(false);
@@ -50,6 +53,8 @@
   let videoEl = $state<HTMLVideoElement>();
   let timelineEl = $state<HTMLDivElement>();
   let dragging = $state<'in' | 'out' | 'play' | null>(null);
+  let draggingNote = $state<{ id: number; isInterval: boolean; durationMs: number } | null>(null);
+  let draggingNotePreviewMs = $state<number | null>(null);
   let playbackRate = $state(1);
   let generalNoteText = $state('');
 
@@ -174,7 +179,15 @@
   }
   async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); }
   async function refreshDetail() { if (detail) detail = await api.getAsset(detail.id); }
-  function closeDetail() { detail = null; void loadAssets(); }
+  function closeDetail() { detail = null; editingTitle = false; void loadAssets(); }
+  function startEditTitle() { if (!detail) return; titleDraft = detail.title; editingTitle = true; setTimeout(() => titleInputEl?.focus(), 0); }
+  async function saveTitle() {
+    if (!detail || !editingTitle) return;
+    editingTitle = false;
+    const t = titleDraft.trim();
+    if (!t || t === detail.title) return;
+    try { await api.renameAsset(detail.id, t); await refreshDetail(); await loadAssets(); } catch (e) { window.alert(String(e)); }
+  }
   async function deleteCurrentClip() {
     if (!detail) return;
     if (!window.confirm(`Delete "${detail.title}" — the clip AND its file on disk? This cannot be undone.`)) return;
@@ -282,6 +295,27 @@
     const end = n.end_timestamp_ms != null ? start + Math.max(1, n.end_timestamp_ms - (n.timestamp_ms ?? 0)) : undefined;
     try { await api.retimeNote(n.id, start, end); await refreshDetail(); } catch (e) { window.alert(String(e)); }
   }
+  function parseTimeRange(s: string): { start: number; end: number | null } | null {
+    const one = (x: string): number | null => {
+      const segs = x.trim().split(':');
+      if (segs.length < 1 || segs.length > 3) return null;
+      let total = 0;
+      for (const seg of segs) { const v = Number(seg.trim()); if (!isFinite(v) || v < 0) return null; total = total * 60 + v; }
+      return Math.round(total * 1000);
+    };
+    const part = s.trim().split(/\s*[-–—]\s*/);
+    if (part.length === 1) { const t = one(part[0]); return t === null ? null : { start: t, end: null }; }
+    if (part.length === 2) { const a = one(part[0]), b = one(part[1]); return a === null || b === null || b <= a ? null : { start: a, end: b }; }
+    return null;
+  }
+  async function editNoteTime(n: Note) {
+    const cur = n.end_timestamp_ms != null ? `${fmt(n.timestamp_ms ?? 0)}-${fmt(n.end_timestamp_ms)}` : fmt(n.timestamp_ms ?? 0);
+    const input = window.prompt('New time — e.g. "1:23", "83.5" (seconds), or "1:23-1:30" for an interval:', cur);
+    if (input == null) return;
+    const parsed = parseTimeRange(input);
+    if (parsed === null) { window.alert('Could not understand that time.'); return; }
+    try { await api.retimeNote(n.id, parsed.start, parsed.end ?? undefined); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+  }
   async function addTagToNote(n: Note, tagId: number) {
     if (!detail) return;
     // convenience: tagging a moment also tags the clip (the user can still untag the clip below)
@@ -355,7 +389,19 @@
     seek(pointerToMs(e));
     dragging = 'play';                                           // keep scrubbing while the button is held
   }
+  function startNoteDrag(n: Note, e: PointerEvent) {
+    if (e.button !== 0 || !timelineMs) return;
+    e.stopPropagation(); e.preventDefault();
+    draggingNote = { id: n.id, isInterval: n.end_timestamp_ms != null, durationMs: (n.end_timestamp_ms ?? 0) - (n.timestamp_ms ?? 0) };
+    draggingNotePreviewMs = n.timestamp_ms ?? 0;
+  }
   function onPointerMove(e: PointerEvent) {
+    if (draggingNote && timelineMs) {                            // moving a note marker
+      const ms = Math.round(pointerToMs(e));
+      const maxStart = draggingNote.isInterval ? Math.max(0, timelineMs - draggingNote.durationMs) : timelineMs;
+      draggingNotePreviewMs = Math.max(0, Math.min(ms, maxStart));
+      return;
+    }
     if (!dragging || !timelineMs) return;
     const ms = Math.round(pointerToMs(e));
     if (dragging === 'in') {
@@ -368,7 +414,20 @@
       seek(ms);
     }
   }
-  function endDrag() { dragging = null; }
+  function endDrag() {
+    if (draggingNote) {
+      const dn = draggingNote, prev = draggingNotePreviewMs;
+      draggingNote = null; draggingNotePreviewMs = null; dragging = null;
+      if (prev !== null && detail) {
+        const orig = detail.timestamped_notes.find((n) => n.id === dn.id)?.timestamp_ms ?? 0;
+        if (prev === orig) seek(orig);                           // a plain click on the marker -> seek to it
+        else void api.retimeNote(dn.id, prev, dn.isInterval ? prev + dn.durationMs : undefined)
+          .then(() => refreshDetail()).catch((e) => window.alert(String(e)));
+      }
+      return;
+    }
+    dragging = null;
+  }
   async function doEdit(kind: EditKind) {
     if (!detail || !selValid || busy) return;
     const id = detail.id, s = Math.round(effIn), o = Math.round(effOut);
@@ -551,7 +610,12 @@
       <button class="btn sm" onclick={closeDetail}>← Library</button>
       <button class="btn sm" onclick={() => gotoSibling(-1)} title="Previous clip ({binding('prev_asset')})">‹</button>
       <button class="btn sm" onclick={() => gotoSibling(1)} title="Next clip ({binding('next_asset')})">›</button>
-      <div class="otitle">{d.title}</div>
+      {#if editingTitle}
+        <input class="field" style:max-width="320px" bind:value={titleDraft} bind:this={titleInputEl}
+               onkeydown={(e) => { if (e.key === 'Enter') saveTitle(); else if (e.key === 'Escape') editingTitle = false; }} onblur={saveTitle} />
+      {:else}
+        <button class="otitle" onclick={startEditTitle} title="rename — the displayed title (the file on disk isn't touched)">{d.title} <span class="faint" style:font-size="11px">✎</span></button>
+      {/if}
       <span style:flex="1"></span>
       <button class="btn sm" onclick={deleteCurrentClip} title="Delete this clip and its file from disk">🗑 Delete clip</button>
       <button class="btn sm" onclick={() => (showKeys = true)} title="Keyboard shortcuts">⌨ Keys</button>
@@ -566,10 +630,15 @@
         <div class="timeline" bind:this={timelineEl} class:dragging onpointerdown={timelinePointerDown} title="Click or drag to seek; drag the IN / OUT handles to adjust">
           {#if selValid}<div class="sel" style:left={pct(effIn) + '%'} style:width={Math.max(0, pct(effOut) - pct(effIn)) + '%'}></div>{/if}
           {#each d.timestamped_notes as n (n.id)}
+            {@const ndrag = draggingNote?.id === n.id && draggingNotePreviewMs !== null}
+            {@const ns = ndrag ? (draggingNotePreviewMs as number) : (n.timestamp_ms ?? 0)}
             {#if n.end_timestamp_ms != null}
-              <div class="nbar" style:left={pct(n.timestamp_ms ?? 0) + '%'} style:width={Math.max(0.7, pct(n.end_timestamp_ms) - pct(n.timestamp_ms ?? 0)) + '%'} title={n.body}></div>
+              {@const ne = ndrag ? (draggingNotePreviewMs as number) + (draggingNote?.durationMs ?? 0) : n.end_timestamp_ms}
+              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+              <div class="nbar" class:ndrag onpointerdown={(e) => startNoteDrag(n, e)} style:left={pct(ns) + '%'} style:width={Math.max(0.7, pct(ne) - pct(ns)) + '%'} title="{n.body} — drag to move"></div>
             {:else}
-              <div class="ntick" style:left={pct(n.timestamp_ms ?? 0) + '%'} title={n.body}></div>
+              <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+              <div class="ntick" class:ndrag onpointerdown={(e) => startNoteDrag(n, e)} style:left={pct(ns) + '%'} title="{n.body} — drag to move"></div>
             {/if}
           {/each}
           <div class="playhead" style:left={pct(curMs) + '%'}></div>
@@ -658,7 +727,8 @@
               </div>
             {/if}
             <span class="body">{n.body}</span>
-            <button class="x" onclick={() => retimeNote(n)} title="move to {fmt(curMs)}">↻</button>
+            <button class="x" onclick={() => retimeNote(n)} title="move to the current playhead ({fmt(curMs)})">↻</button>
+            <button class="x" onclick={() => editNoteTime(n)} title="type a new time">✏</button>
             <button class="x" onclick={() => deleteNote(n.id)} title="delete">🗑</button>
           </div>
           {#if n.tag_ids.length > 0}
@@ -673,8 +743,9 @@
         {#if d.timestamped_notes.length === 0}<span class="faint">none yet — use “+ note @ now”</span>{/if}
         <h4>References</h4>
         <span class="faint">{d.reference_count} reference(s). Editing references (with relation types) is in the desktop UI mockup; this minimal build doesn't include it yet.</span>
-        <h4>File <button class="x" onclick={renameFile} title="rename the file on disk (keeps the extension)">✎</button></h4>
+        <h4>File</h4>
         {#each d.paths as p (p.path)}<div class="src" class:miss={!p.present} title={p.path}>{p.present ? '✓' : '✗'} {p.path}</div>{/each}
+        <button class="btn sm" style:margin-top="7px" onclick={renameFile}>✎ Rename the file on disk</button>
       </div>
     </div>
   </div>
@@ -822,6 +893,11 @@
   .overlay { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; z-index: 50; }
   .otop { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 48px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
   .otitle { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  button.otitle { background: transparent; border: none; color: inherit; cursor: pointer; padding: 0; font: inherit; font-weight: 700; text-align: left; }
+  button.otitle:hover { color: var(--accent); }
+  .timeline .ntick, .timeline .nbar { cursor: grab; }
+  .timeline .ntick::before { content: ''; position: absolute; inset: 0 -5px; }   /* fatter hit area for grabbing the tick */
+  .timeline .ntick.ndrag, .timeline .nbar.ndrag { opacity: .85; z-index: 3; box-shadow: 0 0 0 1px rgba(255,255,255,.45); cursor: grabbing; }
   .obody { flex: 1; display: flex; min-height: 0; }
   .player { flex: 1; display: flex; flex-direction: column; padding: 12px; gap: 10px; background: #080a0d; min-width: 0; }
   .player video { flex: 1; min-height: 0; width: 100%; background: #000; border-radius: var(--r); }
