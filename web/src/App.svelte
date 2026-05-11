@@ -322,6 +322,11 @@
     return Math.round((haveExact ? exactFrameTime : (videoEl?.currentTime ?? 0)) * 1000);
   }
   function togglePlay() { if (videoEl) { if (videoEl.paused) void videoEl.play(); else videoEl.pause(); } }
+  // The <video controls> buttons (mute / fullscreen / ...) live in the user-agent shadow DOM and grab
+  // focus when clicked. Once focus is in there, the keydown event does not compose out of the shadow
+  // root -- so our window onkeydown never fires, and space / Enter re-activate the focused button
+  // instead. Bumping focus back to <body> after any interaction keeps the app's shortcuts in charge.
+  function deflectVideoFocus() { setTimeout(() => videoEl?.blur(), 0); }
   function setIn() { selIn = frameNowMs(); if (selOut !== null && selOut <= selIn) selOut = null; }
   function setOut() { selOut = frameNowMs(); if (selIn !== null && selIn >= selOut) selIn = null; }
   function clearSel() { selIn = null; selOut = null; }
@@ -510,6 +515,7 @@
     <div class="obody">
       <div class="player">
         <video bind:this={videoEl} src={`${d.stream_url}?v=${videoVersion}`} controls
+               onpointerdown={deflectVideoFocus} onfocusin={deflectVideoFocus}
                ontimeupdate={() => { if (videoEl) curMs = Math.floor(videoEl.currentTime * 1000); }}
                onloadedmetadata={() => { if (videoEl && Number.isFinite(videoEl.duration)) durMs = Math.floor(videoEl.duration * 1000); }}></video>
         <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
