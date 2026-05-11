@@ -13,6 +13,11 @@
   let total = $state(0);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  // in-app dialogs (replace window.confirm / window.prompt) and toasts (replace window.alert)
+  let dialog = $state<{ kind: 'confirm' | 'prompt'; message: string; detail: string; value: string; placeholder: string; okLabel: string; danger: boolean; multiline: boolean; mentions: boolean; done: (r: string | boolean | null) => void } | null>(null);
+  let dlgInputEl = $state<HTMLInputElement | HTMLTextAreaElement>();
+  let toasts = $state<{ id: number; text: string; kind: 'info' | 'error' | 'success' }[]>([]);
+  let toastSeq = 0;
 
   let quick = $state<Quick>('all');
   let filterTagIds = $state<number[]>([]);
@@ -112,6 +117,24 @@
     return typeof v === 'number' ? v : (fine ? 1 : 5);
   }
 
+  function toast(text: string, kind: 'info' | 'error' | 'success' = 'info') {
+    const id = ++toastSeq;
+    toasts = [...toasts, { id, text, kind }];
+    setTimeout(() => { toasts = toasts.filter((t) => t.id !== id); }, kind === 'error' ? 6000 : 3500);
+  }
+  function confirmDialog(message: string, opts: { detail?: string; okLabel?: string; danger?: boolean } = {}): Promise<boolean> {
+    return new Promise<boolean>((res) => {
+      dialog = { kind: 'confirm', message, detail: opts.detail ?? '', value: '', placeholder: '', okLabel: opts.okLabel ?? 'OK', danger: opts.danger ?? false, multiline: false, mentions: false, done: (r) => res(r === true) };
+    });
+  }
+  function promptDialog(message: string, opts: { value?: string; placeholder?: string; okLabel?: string; detail?: string; multiline?: boolean; mentions?: boolean } = {}): Promise<string | null> {
+    return new Promise<string | null>((res) => {
+      dialog = { kind: 'prompt', message, detail: opts.detail ?? '', value: opts.value ?? '', placeholder: opts.placeholder ?? '', okLabel: opts.okLabel ?? 'OK', danger: false, multiline: opts.multiline ?? false, mentions: opts.mentions ?? false, done: (r) => res(typeof r === 'string' ? r : null) };
+      setTimeout(() => dlgInputEl?.select(), 0);
+    });
+  }
+  function dialogOk() { const d = dialog; dialog = null; mention = null; if (d) d.done(d.kind === 'prompt' ? d.value : true); }
+  function dialogCancel() { const d = dialog; dialog = null; mention = null; if (d) d.done(d.kind === 'prompt' ? null : false); }
   async function loadTags() { try { tags = await api.listTags(); } catch (e) { error = String(e); } }
   async function loadSources() { try { sources = await api.listSources(); } catch (e) { error = String(e); } }
   async function loadAssets() {
@@ -172,58 +195,59 @@
     else if (e.ctrlKey || e.metaKey) toggleSelect(a);
     else void openDetail(a);
   }
-  async function bulkRun(label: string, fn: (id: number) => Promise<unknown>, confirmMsg?: string) {
+  async function bulkRun(label: string, fn: (id: number) => Promise<unknown>) {
     const ids = [...selected];
-    if (ids.length === 0 || bulkBusy || (confirmMsg !== undefined && !window.confirm(confirmMsg))) return;
+    if (ids.length === 0 || bulkBusy) return;
     bulkBusy = true;
     try {
       const results = await Promise.allSettled(ids.map(fn));
       const failed = results.filter((r) => r.status === 'rejected').length;
       await loadAssets(); await loadTags(); await refreshDetail();
-      if (failed > 0) window.alert(`${label}: ${ids.length - failed} ok, ${failed} failed.`);
+      toast(failed > 0 ? `${label}: ${ids.length - failed} ok, ${failed} failed` : `${label}: ${ids.length} done`, failed > 0 ? 'error' : 'success');
     } finally { bulkBusy = false; }
   }
   function bulkApplyTag(tagId: number) { void bulkRun('apply tag', (id) => api.applyTag(id, tagId)); }
   function bulkRemoveTagFn(tagId: number) { void bulkRun('remove tag', (id) => api.unapplyTag(id, tagId)); }
-  function bulkDelete() {
+  async function bulkDelete() {
     const n = selected.size;
-    void bulkRun('delete', (id) => api.deleteAsset(id, true), `Delete ${n} clip(s) AND their files from disk? This cannot be undone.`);
+    if (n === 0 || !await confirmDialog(`Delete ${n} clip${n === 1 ? '' : 's'}?`, { detail: 'This removes them AND their files on disk — there is no undo.', okLabel: `Delete ${n}`, danger: true })) return;
+    await bulkRun('deleted', (id) => api.deleteAsset(id, true));
   }
   async function loadRefs() { if (!detail) { refs = { outgoing: [], incoming: [] }; return; } try { refs = await api.getReferences(detail.id); } catch { /* ignore */ } }
   async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); editingTitle = false; addingRef = false; await loadRefs(); }
-  async function openClip(id: number) { try { detail = await api.getAsset(id); void api.markOpened(id); editingTitle = false; addingRef = false; await loadRefs(); } catch (e) { window.alert(String(e)); } }
+  async function openClip(id: number) { try { detail = await api.getAsset(id); void api.markOpened(id); editingTitle = false; addingRef = false; await loadRefs(); } catch (e) { toast(String(e), 'error'); } }
   async function refreshDetail() { if (detail) { detail = await api.getAsset(detail.id); await loadRefs(); } }
   function closeDetail() { detail = null; refs = { outgoing: [], incoming: [] }; editingTitle = false; addingRef = false; void loadAssets(); }
   async function addRef(toId: number) {
     if (!detail) return;
-    try { await api.addReference({ from_asset_id: detail.id, to_asset_id: toId, type_id: refTypeId ? Number(refTypeId) : null }); addingRef = false; refClipQuery = ''; await loadRefs(); } catch (e) { window.alert(String(e)); }
+    try { await api.addReference({ from_asset_id: detail.id, to_asset_id: toId, type_id: refTypeId ? Number(refTypeId) : null }); addingRef = false; refClipQuery = ''; await loadRefs(); } catch (e) { toast(String(e), 'error'); }
   }
-  async function deleteRef(id: number) { try { await api.deleteReference(id); await loadRefs(); } catch (e) { window.alert(String(e)); } }
+  async function deleteRef(id: number) { try { await api.deleteReference(id); await loadRefs(); } catch (e) { toast(String(e), 'error'); } }
   function startEditTitle() { if (!detail) return; titleDraft = detail.title; editingTitle = true; setTimeout(() => titleInputEl?.focus(), 0); }
   async function saveTitle() {
     if (!detail || !editingTitle) return;
     editingTitle = false;
     const t = titleDraft.trim();
     if (!t || t === detail.title) return;
-    try { await api.renameAsset(detail.id, t); await refreshDetail(); await loadAssets(); } catch (e) { window.alert(String(e)); }
+    try { await api.renameAsset(detail.id, t); await refreshDetail(); await loadAssets(); } catch (e) { toast(String(e), 'error'); }
   }
   async function deleteCurrentClip() {
     if (!detail) return;
-    if (!window.confirm(`Delete "${detail.title}" — the clip AND its file on disk? This cannot be undone.`)) return;
-    try { await api.deleteAsset(detail.id, true); closeDetail(); await loadTags(); } catch (e) { window.alert(String(e)); }
+    if (!await confirmDialog(`Delete “${detail.title}”?`, { detail: 'This removes the clip AND its file on disk — there is no undo.', okLabel: 'Delete clip', danger: true })) return;
+    try { await api.deleteAsset(detail.id, true); closeDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
   }
   async function renameFile() {
     if (!detail) return;
     const cur = ((detail.paths.find((p) => p.present) ?? detail.paths[0])?.path) ?? '';
     const base = cur ? (cur.split(/[\\/]/).pop() ?? '') : detail.title;
-    const next = window.prompt('New file name (the extension is kept):', base);
+    const next = await promptDialog('Rename the file', { value: base, detail: 'The extension is kept.', okLabel: 'Rename' });
     if (next == null || next.trim() === '' || next.trim() === base) return;
     if (videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }   // release the file
     try {
       await new Promise<void>((r) => setTimeout(r, 250));
       await api.renameFile(detail.id, next.trim());
       await refreshDetail(); await loadAssets();
-    } catch (e) { window.alert(String(e)); } finally { videoVersion += 1; }
+    } catch (e) { toast(String(e), 'error'); } finally { videoVersion += 1; }
   }
   function gotoSibling(delta: number) {
     if (!detail) return;
@@ -233,9 +257,9 @@
   }
 
   async function addSourcePrompt() {
-    const path = window.prompt('Folder path to add as a source:');
+    const path = await promptDialog('Add a source folder', { placeholder: 'e.g. D:\\Clips', okLabel: 'Add' });
     if (!path) return;
-    try { await api.addSource(path); await loadSources(); } catch (e) { window.alert(String(e)); }
+    try { await api.addSource(path); await loadSources(); } catch (e) { toast(String(e), 'error'); }
   }
   function scanAll() {
     void (async () => {
@@ -248,7 +272,7 @@
           } else { scanJob = null; await loadAssets(); await loadTags(); }
         };
         await tick();
-      } catch (e) { scanJob = null; window.alert(String(e)); }
+      } catch (e) { scanJob = null; toast(String(e), 'error'); }
     })();
   }
   function startEditTag(t: Tag) { editingTagId = t.id; newTagName = t.name; newTagColor = t.color; tagIcon = t.icon ?? ''; tagImageRef = t.image_ref; }
@@ -261,7 +285,7 @@
     if (!file) return;
     uploadingImg = true;
     try { tagImageRef = (await api.uploadTagImage(file)).image_ref; }
-    catch (err) { window.alert(String(err)); }
+    catch (err) { toast(String(err), 'error'); }
     finally { uploadingImg = false; }
   }
   async function saveTag() {
@@ -276,23 +300,23 @@
         await api.updateTag(editingTagId, { name, color: newTagColor, icon, image_ref: tagImageRef, description: orig?.description ?? '', sort_order: orig?.sort_order ?? 0 });
       }
       cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail();
-    } catch (e) { window.alert(String(e)); }
+    } catch (e) { toast(String(e), 'error'); }
   }
   async function deleteTag(id: number) {
-    if (!window.confirm('Delete this tag everywhere?')) return;
-    try { await api.deleteTag(id); if (editingTagId === id) cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    if (!await confirmDialog('Delete this tag everywhere?', { detail: 'It is removed from every clip and note.', okLabel: 'Delete', danger: true })) return;
+    try { await api.deleteTag(id); if (editingTagId === id) cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
   async function applyTag(tagId: number) {
     if (!detail) return;
-    try { await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { window.alert(String(e)); }
+    try { await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
   }
   async function unapplyTag(tagId: number) {
     if (!detail) return;
-    try { await api.unapplyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { window.alert(String(e)); }
+    try { await api.unapplyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
   }
   async function saveGeneralNote() {
     if (!detail) return;
-    try { await api.setGeneralNote(detail.id, generalNoteText); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    try { await api.setGeneralNote(detail.id, generalNoteText); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
   // ---- @-mention: link another clip from inside a note ------------------
   const _MIRROR_KEYS = ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight','letterSpacing','textTransform','textAlign','paddingTop','paddingRight','paddingBottom','paddingLeft','borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth','boxSizing'] as const;
@@ -353,27 +377,28 @@
   function startEditNoteBody(n: Note) { editNoteBodyId = n.id; noteBodyDraft = n.body; mention = null; }
   async function saveNoteBody(noteId: number) {
     editNoteBodyId = null; mention = null;
-    try { await api.updateNote(noteId, noteBodyDraft); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    try { await api.updateNote(noteId, noteBodyDraft); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
   async function addNote(ms: number, endMs: number | null = null) {
     if (!detail) return;
-    const body = window.prompt(endMs === null ? `Note at ${fmt(ms)}:` : `Note for ${fmt(ms)} – ${fmt(endMs)}:`);
+    const body = await promptDialog(endMs === null ? `Add a note at ${fmt(ms)}` : `Add a note for ${fmt(ms)} – ${fmt(endMs)}`,
+      { multiline: true, mentions: true, placeholder: 'what happened here… (type @ to link a clip)', okLabel: 'Add note' });
     if (body === null) return;
     try { await api.addTimestampNote(detail.id, Math.floor(ms), body, endMs === null ? undefined : Math.floor(endMs)); await refreshDetail(); }
-    catch (e) { window.alert(String(e)); }
+    catch (e) { toast(String(e), 'error'); }
   }
   function addNoteAtNow() { void addNote(frameNowMs()); }
   function addIntervalNote() {
-    if (!selValid) { window.alert(`Set a selection first: press "${binding('sel_in')}" (in) and/or "${binding('sel_out')}" (out) -- one is enough; the rest is taken from start/end.`); return; }
+    if (!selValid) { toast(`Set a selection first: press “${binding('sel_in')}” (in) and/or “${binding('sel_out')}” (out) — one is enough; the rest is taken from start/end.`, 'info'); return; }
     void addNote(effIn, effOut);
   }
   async function deleteNote(id: number) {
-    try { await api.deleteNote(id); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    try { await api.deleteNote(id); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
   async function retimeNote(n: Note) {
     const start = frameNowMs();
     const end = n.end_timestamp_ms != null ? start + Math.max(1, n.end_timestamp_ms - (n.timestamp_ms ?? 0)) : undefined;
-    try { await api.retimeNote(n.id, start, end); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    try { await api.retimeNote(n.id, start, end); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
   function parseTimeRange(s: string): { start: number; end: number | null } | null {
     const one = (x: string): number | null => {
@@ -390,20 +415,20 @@
   }
   async function editNoteTime(n: Note) {
     const cur = n.end_timestamp_ms != null ? `${fmt(n.timestamp_ms ?? 0)}-${fmt(n.end_timestamp_ms)}` : fmt(n.timestamp_ms ?? 0);
-    const input = window.prompt('New time — e.g. "1:23", "83.5" (seconds), or "1:23-1:30" for an interval:', cur);
+    const input = await promptDialog('Set the note time', { value: cur, detail: 'e.g. "1:23", "83.5" (seconds), or "1:23-1:30" for an interval', okLabel: 'Set time' });
     if (input == null) return;
     const parsed = parseTimeRange(input);
-    if (parsed === null) { window.alert('Could not understand that time.'); return; }
-    try { await api.retimeNote(n.id, parsed.start, parsed.end ?? undefined); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    if (parsed === null) { toast("Couldn't understand that time.", 'error'); return; }
+    try { await api.retimeNote(n.id, parsed.start, parsed.end ?? undefined); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
   async function addTagToNote(n: Note, tagId: number) {
     if (!detail) return;
     // convenience: tagging a moment also tags the clip (the user can still untag the clip below)
     try { await api.setNoteTags(n.id, [...n.tag_ids, tagId]); await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); }
-    catch (e) { window.alert(String(e)); }
+    catch (e) { toast(String(e), 'error'); }
   }
   async function removeTagFromNote(n: Note, tagId: number) {
-    try { await api.setNoteTags(n.id, n.tag_ids.filter((x) => x !== tagId)); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+    try { await api.setNoteTags(n.id, n.tag_ids.filter((x) => x !== tagId)); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
   function openTagDropdown(noteId: number) {
     tagDropdownNoteId = noteId; tagDropdownSearch = '';
@@ -500,7 +525,7 @@
         const orig = detail.timestamped_notes.find((n) => n.id === dn.id)?.timestamp_ms ?? 0;
         if (prev === orig) seek(orig);                           // a plain click on the marker -> seek to it
         else void api.retimeNote(dn.id, prev, dn.isInterval ? prev + dn.durationMs : undefined)
-          .then(() => refreshDetail()).catch((e) => window.alert(String(e)));
+          .then(() => refreshDetail()).catch((e) => toast(String(e), 'error'));
       }
       return;
     }
@@ -510,9 +535,9 @@
     if (!detail || !selValid || busy) return;
     const id = detail.id, s = Math.round(effIn), o = Math.round(effOut);
     const span = `${fmt(s)} – ${fmt(o)}`;
-    if (kind === 'trim' && !window.confirm(`Permanently shorten this clip to keep only ${span}? There is no undo.`)) return;
-    if (kind === 'remove' && !window.confirm(`Permanently cut ${span} out of this clip? There is no undo.`)) return;
-    if (kind === 'cut' && !window.confirm(`Save ${span} as a new clip AND cut it out of this clip? The cut has no undo.`)) return;
+    if (kind === 'trim' && !await confirmDialog(`Trim this clip to keep only ${span}?`, { detail: 'The rest is permanently removed — there is no undo.', okLabel: 'Trim', danger: true })) return;
+    if (kind === 'remove' && !await confirmDialog(`Cut ${span} out of this clip?`, { detail: 'There is no undo.', okLabel: 'Remove', danger: true })) return;
+    if (kind === 'cut' && !await confirmDialog(`Save ${span} as a new clip AND cut it out of this one?`, { detail: 'The cut has no undo.', okLabel: 'Cut to new clip', danger: true })) return;
     busy = true;
     const touchesSource = kind !== 'extract';                          // 'extract' only writes a new file
     if (touchesSource && videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }  // release the file
@@ -520,11 +545,11 @@
       if (touchesSource) await new Promise<void>((r) => setTimeout(r, 250));   // let the backend close its stream handle
       if (kind === 'trim') await api.trimAsset(id, s, o);
       else if (kind === 'remove') await api.removeSegment(id, s, o);
-      else { const made = await api.extractSegment(id, s, o, kind === 'cut'); window.alert(`Saved as a new clip: ${made.title}`); }
+      else { const made = await api.extractSegment(id, s, o, kind === 'cut'); toast(`Saved as a new clip: ${made.title}`, 'success'); }
       clearSel();
       await refreshDetail();
       await loadAssets();
-    } catch (e) { window.alert(String(e)); } finally { videoVersion += 1; busy = false; }
+    } catch (e) { toast(String(e), 'error'); } finally { videoVersion += 1; busy = false; }
   }
 
   function openSettings() {
@@ -570,7 +595,13 @@
       capturingAction = null;
       return;
     }
-    // (2) Esc always closes the Settings modal, even from a focused input
+    // (2) an in-app dialog: Esc cancels it, Enter confirms it
+    if (dialog !== null) {
+      if (e.key === 'Escape') { e.preventDefault(); dialogCancel(); }
+      else if (e.key === 'Enter' && dialog.kind === 'confirm') { e.preventDefault(); dialogOk(); }
+      return;
+    }
+    // (3) Esc always closes the Settings modal, even from a focused input
     if (showSettings && e.key === 'Escape') { closeSettings(); return; }
     if (inEditable(e.target)) return;
     // (3) while Settings is open, don't fire app shortcuts behind it
@@ -975,6 +1006,39 @@
   </div>
 {/if}
 
+{#if dialog}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) dialogCancel(); }}>
+    <div class="modal dlg">
+      <div class="dlg-msg">{dialog.message}</div>
+      {#if dialog.detail}<div class="dlg-detail">{dialog.detail}</div>{/if}
+      {#if dialog.kind === 'prompt'}
+        {#if dialog.multiline}
+          <textarea class="field dlg-input" rows="3" bind:value={dialog.value} bind:this={dlgInputEl} placeholder={dialog.placeholder}
+                    oninput={(e) => { if (dialog?.mentions) onMentionInput(e, (s) => { if (dialog) dialog.value = s; }); }}
+                    onkeydown={(e) => { if (e.key === 'Escape') { e.stopPropagation(); if (mention) closeMention(); else dialogCancel(); } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !mention) { e.preventDefault(); dialogOk(); } }}></textarea>
+        {:else}
+          <input class="field dlg-input" bind:value={dialog.value} bind:this={dlgInputEl} placeholder={dialog.placeholder}
+                 onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); dialogOk(); } else if (e.key === 'Escape') { e.stopPropagation(); dialogCancel(); } }} />
+        {/if}
+      {/if}
+      <div class="dlg-btns">
+        {#if dialog.multiline}<span class="faint" style:font-size="11px">Ctrl+Enter to save</span>{/if}
+        <span style:flex="1"></span>
+        <button class="btn sm" onclick={dialogCancel}>Cancel</button>
+        <button class="btn sm" class:primary={!dialog.danger} class:danger={dialog.danger} onclick={dialogOk}>{dialog.okLabel}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+{#if toasts.length}
+  <div class="toasts">
+    {#each toasts as t (t.id)}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div class="toast {t.kind}" onclick={() => (toasts = toasts.filter((x) => x.id !== t.id))} title="dismiss">{t.text}</div>
+    {/each}
+  </div>
+{/if}
 {#if mention}
   {@const matches = assets.filter((a) => a.title.toLowerCase().includes(mention.query)).slice(0, 10)}
   <div class="mention-dropdown" style:top={mention.top + 'px'} style:left={mention.left + 'px'}>
@@ -1075,6 +1139,20 @@
   .mention-popup { position: fixed; z-index: 75; pointer-events: none; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.55); padding: 6px; width: 200px; }
   .mention-popup img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 5px; background: #11141a; display: block; }
   .mention-popup-title { font-size: 12px; font-weight: 600; margin-top: 5px; word-break: break-word; }
+  .toasts { position: fixed; bottom: 16px; right: 16px; z-index: 90; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
+  .toast { background: var(--bg-1); border: 1px solid var(--border); border-left: 3px solid var(--text-3); border-radius: 8px; padding: 9px 13px; font-size: 12.5px; box-shadow: 0 6px 22px rgba(0,0,0,.5); cursor: pointer; animation: toastin .18s ease; word-break: break-word; line-height: 1.4; }
+  .toast.error { border-left-color: #ef5b5b; }
+  .toast.success { border-left-color: #56c271; }
+  .toast.info { border-left-color: var(--accent); }
+  @keyframes toastin { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+  .dlg { width: min(420px, 100%); padding: 18px; }
+  .dlg-msg { font-size: 14.5px; font-weight: 600; line-height: 1.4; }
+  .dlg-detail { font-size: 12.5px; color: var(--text-2); margin-top: 7px; line-height: 1.45; }
+  .dlg-input { width: 100%; margin-top: 13px; box-sizing: border-box; }
+  textarea.dlg-input { resize: vertical; }
+  .dlg-btns { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+  .btn.danger { background: #b3261e; border-color: #c0392b; color: #fff; }
+  .btn.danger:hover { background: #c0392b; }
   .tsntags { display: flex; flex-wrap: wrap; gap: 4px; margin: -2px 0 9px; padding-left: 2px; }
   .tagchip.ntag { font-size: 10px; padding: 1px 6px; }
   .tagpicker { position: relative; display: inline-block; }
