@@ -16,6 +16,7 @@ export interface AssetDetail extends AssetSummary {
   paths: { path: string; present: boolean; volume_id: string | null }[];
   general_note: string | null; general_note_id: number | null; timestamped_notes: Note[];
   mentioned_assets: Record<string, string>;   // "@{id}"-mentioned clips in this asset's notes -> title
+  mentioned_notes: Record<string, { clip_id: number; body: string; timestamp_ms: number }>;  // "@{clip#note}" -> note info
 }
 export interface Tag {
   id: number; name: string; color: string; icon: string | null; image_ref: string | null;
@@ -26,7 +27,7 @@ export interface ReferenceView {
   id: number; from_asset_id: number; to_asset_id: number;
   type_id: number | null; type_name: string | null; label: string; note: string;
   from_timestamp_ms: number | null; to_timestamp_ms: number | null;
-  other_asset_id: number; other_asset_title: string;
+  other_asset_id: number; other_asset_title: string; to_note_body: string | null;
 }
 export interface Source { id: number; path: string; recursive: boolean; enabled: boolean; media_types: string[]; last_scanned_at: string | null; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }

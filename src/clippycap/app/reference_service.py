@@ -17,6 +17,7 @@ class ReferenceView:
     type_name: str | None       # the *directional* name (reverse_name when seen from the "to" side)
     other_asset_id: int
     other_asset_title: str
+    to_note_body: str | None    # body of the note at reference.to_timestamp_ms in reference.to_asset_id, if any
 
 
 @dataclass
@@ -82,9 +83,16 @@ class ReferenceService:
                     name = (rtype.reverse_name or rtype.name) if incoming else rtype.name
                 other_id = ref.from_asset_id if incoming else ref.to_asset_id
                 other = uow.assets.get(other_id)
+                to_note_body: str | None = None
+                if ref.to_timestamp_ms is not None:
+                    for n in uow.notes.list_for_asset(ref.to_asset_id):
+                        if n.timestamp_ms == ref.to_timestamp_ms:
+                            to_note_body = n.body
+                            break
                 return ReferenceView(
                     reference=ref, type_name=name, other_asset_id=other_id,
                     other_asset_title=other.title if other is not None else "(deleted)",
+                    to_note_body=to_note_body,
                 )
 
             outgoing = [view(r, incoming=False) for r in uow.references.list_outgoing(asset_id)]

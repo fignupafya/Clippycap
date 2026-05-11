@@ -87,6 +87,7 @@ def _ref_view_dict(view: ReferenceView) -> dict[str, Any]:
         "type_id": ref.type_id, "type_name": view.type_name, "label": ref.label, "note": ref.note,
         "from_timestamp_ms": ref.from_timestamp_ms, "to_timestamp_ms": ref.to_timestamp_ms,
         "other_asset_id": view.other_asset_id, "other_asset_title": view.other_asset_title,
+        "to_note_body": view.to_note_body,
     }
 
 
@@ -112,6 +113,7 @@ def _detail_dict(detail: AssetDetail) -> dict[str, Any]:
         "general_note_id": detail.general_note.id if detail.general_note is not None else None,
         "timestamped_notes": [_note_dict(n) for n in detail.timestamped_notes],
         "mentioned_assets": {str(k): v for k, v in detail.mentioned.items()},
+        "mentioned_notes": {str(k): v for k, v in detail.mentioned_notes.items()},
     }
 
 

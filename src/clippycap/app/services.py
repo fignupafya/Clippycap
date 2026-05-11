@@ -37,9 +37,10 @@ from clippycap.core.ports import Database, UnitOfWork
 from clippycap.core.query import AssetFilter
 from clippycap.infra.media.video_thumbnail import purge_asset_thumbnails
 
-# Note bodies may embed "@{<asset id>}" tokens (inserted by the UI's @-mention picker). They turn a
-# note into a cross-reference: when such a note is saved, a Reference to the mentioned clip is created.
-MENTION_RE = re.compile(r"@\{(\d+)\}")
+# Note bodies may embed "@{<asset id>}" or "@{<asset id>#<note id>}" tokens (inserted by the UI's
+# @-mention picker). They turn a note into a cross-reference: when such a note is saved, a Reference
+# to the mentioned clip is created (with the mentioned note's timestamp on it, when one is given).
+MENTION_RE = re.compile(r"@\{(\d+)(?:#(\d+))?\}")
 
 
 # --------------------------------------------------------------------------- result types
@@ -75,7 +76,8 @@ class AssetDetail:
     paths: list[AssetPath]
     general_note: Note | None
     timestamped_notes: list[NoteView]
-    mentioned: dict[int, str]      # asset ids @-mentioned anywhere in this asset's notes -> their titles
+    mentioned: dict[int, str]                 # clip ids @-mentioned in this asset's notes -> their titles
+    mentioned_notes: dict[int, dict[str, Any]]  # note ids @-mentioned ("@{clip#note}") -> {clip_id, body, timestamp_ms}
 
 
 def _require[T](value: T | None, what: str, key: object) -> T:
@@ -125,15 +127,26 @@ class AssetService:
                 if n.timestamp_ms is not None and n.id is not None
             ]
             mentioned: dict[int, str] = {}
+            mentioned_notes: dict[int, dict[str, Any]] = {}
             for note in all_notes:
-                for raw in MENTION_RE.findall(note.body):
-                    mid = int(raw)
-                    if mid != asset_id and mid not in mentioned:
+                for mm in MENTION_RE.finditer(note.body):
+                    mid = int(mm.group(1))
+                    if mid == asset_id:
+                        continue
+                    if mid not in mentioned:
                         other = uow.assets.get(mid)
                         mentioned[mid] = other.title if other is not None else "(deleted)"
+                    if mm.group(2) is not None:
+                        nid = int(mm.group(2))
+                        if nid not in mentioned_notes:
+                            tnote = uow.notes.get(nid)
+                            if tnote is not None and tnote.asset_id == mid and tnote.timestamp_ms is not None:
+                                mentioned_notes[nid] = {
+                                    "clip_id": mid, "body": tnote.body, "timestamp_ms": tnote.timestamp_ms,
+                                }
         return AssetDetail(
             asset=asset, tag_ids=tag_ids, paths=paths, general_note=general,
-            timestamped_notes=timestamped, mentioned=mentioned,
+            timestamped_notes=timestamped, mentioned=mentioned, mentioned_notes=mentioned_notes,
         )
 
     def get(self, asset_id: int) -> Asset | None:
@@ -335,17 +348,31 @@ class NoteService:
         self._bus = event_bus
 
     def _sync_mention_refs(self, uow: UnitOfWork, asset_id: int, body: str, from_ts: int | None) -> None:
-        """Ensure a Reference exists from ``asset_id`` to every clip ``@{id}``-mentioned in ``body``."""
-        ids = {int(x) for x in MENTION_RE.findall(body)} - {asset_id}
-        if not ids:
-            return
-        have = {r.to_asset_id for r in uow.references.list_outgoing(asset_id)}
-        for mid in ids:
-            if mid in have or uow.assets.get(mid) is None:
+        """Ensure a Reference exists from ``asset_id`` to every clip @-mentioned in ``body``.
+
+        ``@{clip#note}`` mentions pin the reference to that note's timestamp (``to_timestamp_ms``).
+        """
+        targets: set[tuple[int, int | None]] = set()        # (clip id, to_timestamp_ms)
+        for mm in MENTION_RE.finditer(body):
+            clip_id = int(mm.group(1))
+            if clip_id == asset_id:
                 continue
-            uow.references.add(
-                Reference(from_asset_id=asset_id, to_asset_id=mid, type_id=None, from_timestamp_ms=from_ts)
-            )
+            to_ts: int | None = None
+            if mm.group(2) is not None:
+                note = uow.notes.get(int(mm.group(2)))
+                if note is not None and note.asset_id == clip_id and note.timestamp_ms is not None:
+                    to_ts = note.timestamp_ms
+            targets.add((clip_id, to_ts))
+        if not targets:
+            return
+        have = {(r.to_asset_id, r.to_timestamp_ms) for r in uow.references.list_outgoing(asset_id)}
+        for (clip_id, to_ts) in targets:
+            if (clip_id, to_ts) in have or uow.assets.get(clip_id) is None:
+                continue
+            uow.references.add(Reference(
+                from_asset_id=asset_id, to_asset_id=clip_id, type_id=None,
+                from_timestamp_ms=from_ts, to_timestamp_ms=to_ts,
+            ))
 
     def list_for_asset(self, asset_id: int) -> list[NoteView]:
         with self._db.transaction() as uow:
