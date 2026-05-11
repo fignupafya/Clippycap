@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, ReferenceView, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
@@ -9,6 +9,7 @@
   let tags = $state<Tag[]>([]);
   let tagById = $derived(new Map(tags.map((t) => [t.id, t])));
   let sources = $state<Source[]>([]);
+  let savedViews = $state<SavedView[]>([]);
   let assets = $state<AssetSummary[]>([]);
   let total = $state(0);
   let loading = $state(false);
@@ -37,6 +38,9 @@
   let refPickedId = $state<number | null>(null);
   let refPickedTitle = $state('');
   let refDesc = $state('');
+  let editingRefId = $state<number | null>(null);
+  let refDescDraft = $state('');
+  let refDescEl = $state<HTMLTextAreaElement>();
   let editingTitle = $state(false);
   let titleDraft = $state('');
   let titleInputEl = $state<HTMLInputElement>();
@@ -167,6 +171,7 @@
     void loadTags(); void loadSources();
     void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
     void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
+    void api.listSavedViews().then((v) => { savedViews = v; }).catch(() => { /* none */ });
     void syncFromHash();   // open the clip in the URL hash, if any
   });
   $effect(() => { void loadAssets(); });
@@ -272,6 +277,29 @@
     try { await api.addReference({ from_asset_id: detail.id, to_asset_id: refPickedId, note: refDesc.trim() || undefined }); addingRef = false; refPickedId = null; refDesc = ''; refClipQuery = ''; await loadRefs(); } catch (e) { toast(String(e), 'error'); }
   }
   async function deleteRef(id: number) { try { await api.deleteReference(id); await loadRefs(); } catch (e) { toast(String(e), 'error'); } }
+  function startEditRefDesc(r: ReferenceView) { editingRefId = r.id; refDescDraft = r.note || r.label || ''; setTimeout(() => refDescEl?.focus(), 0); }
+  async function saveRefDesc(refId: number) {
+    editingRefId = null;
+    try { await api.updateReference(refId, refDescDraft.trim()); await loadRefs(); } catch (e) { toast(String(e), 'error'); }
+  }
+  function applySavedView(v: SavedView) {
+    let f: { quick?: string; tag_ids?: number[]; text?: string } = {};
+    try { f = JSON.parse(v.filter_json); } catch { /* fall back to defaults */ }
+    quick = (f.quick === 'new' || f.quick === 'untagged') ? f.quick : 'all';
+    filterTagIds = (f.tag_ids ?? []).filter((id) => tags.some((t) => t.id === id));
+    appliedText = f.text ?? ''; searchText = appliedText; sort = v.sort_key;
+  }
+  async function saveCurrentView() {
+    const name = await promptDialog('Save the current view', { placeholder: 'view name', okLabel: 'Save' });
+    if (name == null || !name.trim()) return;
+    try {
+      await api.createSavedView({ name: name.trim(), filter_json: JSON.stringify({ quick, tag_ids: filterTagIds, text: appliedText }), sort_key: sort, sort_order: savedViews.length });
+      savedViews = await api.listSavedViews();
+    } catch (e) { toast(String(e), 'error'); }
+  }
+  async function removeSavedView(id: number) {
+    try { await api.deleteSavedView(id); savedViews = await api.listSavedViews(); } catch (e) { toast(String(e), 'error'); }
+  }
   function startEditTitle() { if (!detail) return; titleDraft = detail.title; editingTitle = true; setTimeout(() => titleInputEl?.focus(), 0); }
   async function saveTitle() {
     if (!detail || !editingTitle) return;
@@ -728,6 +756,16 @@
         <button class="nav" class:on={quick === 'new'} onclick={() => { quick = 'new'; filterTagIds = []; }}>New (unopened)</button>
         <button class="nav" class:on={quick === 'untagged'} onclick={() => { quick = 'untagged'; filterTagIds = []; }}>Untagged</button>
       </nav>
+      {#if savedViews.length > 0}
+        <div class="sec-title">Saved views</div>
+        {#each savedViews as v (v.id)}
+          <div class="savedview-row">
+            <button class="nav" onclick={() => applySavedView(v)} title={v.name}>★ {v.name}</button>
+            <button class="x" onclick={() => removeSavedView(v.id)} title="remove this view">×</button>
+          </div>
+        {/each}
+      {/if}
+      <button class="btn sm" style:margin-top="6px" onclick={saveCurrentView} title="save the current filter / search as a view">💾 Save current view</button>
       <div class="sec-title">Tags</div>
       <div class="tagcloud">
         {#each tags as t (t.id)}
@@ -999,14 +1037,29 @@
 {#snippet noteBody(body: string)}{#each splitMentions(body) as seg}{#if seg.id != null}{@const nm = seg.noteId != null ? detail?.mentioned_notes?.[String(seg.noteId)] : undefined}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions --><span class="mention" role="link" tabindex="0" onclick={() => (seg.noteId != null ? navToNote(seg.id ?? 0, seg.noteId) : navTo(seg.id ?? 0))} onmouseenter={(e) => showMentionPopup(e, seg.id ?? 0, seg.text, nm?.body, nm?.timestamp_ms)} onmouseleave={hideMentionPopup}>@{seg.text}{#if nm}<span class="ts-badge" style:margin-left="4px">{fmt(nm.timestamp_ms)}</span>{/if}</span>{:else}{seg.text}{/if}{/each}{/snippet}
 {#snippet refCard(r: ReferenceView, outgoing: boolean)}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="ref-card" onclick={() => (outgoing && r.to_timestamp_ms != null ? navToAt(r.other_asset_id, r.to_timestamp_ms) : openClip(r.other_asset_id))} title="open this clip">
+  <div class="ref-card" onclick={() => { if (editingRefId !== r.id) { if (outgoing && r.to_timestamp_ms != null) navToAt(r.other_asset_id, r.to_timestamp_ms); else openClip(r.other_asset_id); } }} title="open this clip">
     <img src="/thumbnails/{r.other_asset_id}" alt="" onerror={hideBrokenImg} />
     <div class="ref-card-body">
       <div class="ref-card-title">{r.other_asset_title}{#if r.to_timestamp_ms != null}<span class="ts-badge" style:margin-left="6px">{fmt(r.to_timestamp_ms)}</span>{/if}</div>
       {#if r.to_note_body !== null && r.to_note_body.trim()}<div class="ref-card-desc"><span class="faint" style:font-size="10.5px">note: </span>{r.to_note_body.trim()}</div>{/if}
-      {#if (r.note || r.label).trim()}<div class="ref-card-desc">{(r.note || r.label).trim()}</div>{/if}
+      {#if editingRefId === r.id}
+        <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+        <div onclick={(e) => e.stopPropagation()}>
+          <textarea class="field ref-desc-edit" rows="2" bind:value={refDescDraft} bind:this={refDescEl} placeholder="description"
+                    onkeydown={(e) => { e.stopPropagation(); if (e.key === 'Escape') editingRefId = null; else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void saveRefDesc(r.id); } }}></textarea>
+          <div class="ref-desc-actions">
+            <button class="btn sm primary" onclick={() => saveRefDesc(r.id)}>Save</button>
+            <button class="btn sm" onclick={() => (editingRefId = null)}>Cancel</button>
+          </div>
+        </div>
+      {:else if (r.note || r.label).trim()}
+        <div class="ref-card-desc">{(r.note || r.label).trim()}</div>
+      {/if}
     </div>
-    <button class="ref-card-x x" onclick={(e) => { e.stopPropagation(); deleteRef(r.id); }} title="remove this reference">×</button>
+    <div class="ref-card-actions">
+      <button class="x edit" onclick={(e) => { e.stopPropagation(); startEditRefDesc(r); }} title="edit the description">✎</button>
+      <button class="x" onclick={(e) => { e.stopPropagation(); deleteRef(r.id); }} title="remove this reference">×</button>
+    </div>
   </div>
 {/snippet}
 {#if showSettings && cfg}
@@ -1178,7 +1231,14 @@
   .ref-card-body { flex: 1; min-width: 0; }
   .ref-card-title { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .ref-card-desc { font-size: 11.5px; color: var(--text-2); margin-top: 4px; white-space: pre-wrap; word-break: break-word; }
-  .ref-card-x { flex: none; font-size: 16px; line-height: 1; }
+  .ref-card-actions { display: flex; flex-direction: column; gap: 2px; flex: none; }
+  .ref-card-actions .x { font-size: 15px; line-height: 1; }
+  .ref-card-actions .x.edit:hover { color: var(--accent); }
+  .ref-desc-edit { width: 100%; box-sizing: border-box; font-size: 12px; resize: vertical; margin-top: 4px; }
+  .ref-desc-actions { display: flex; gap: 6px; margin-top: 5px; }
+  .savedview-row { display: flex; align-items: center; }
+  .savedview-row .nav { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .savedview-row .x { flex: none; }
   .ref-picked { display: flex; align-items: center; gap: 8px; width: 100%; font-size: 12.5px; }
   .ref-picked img { width: 52px; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; flex: none; background: #11141a; }
   .ref-picked b { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

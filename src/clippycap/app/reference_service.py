@@ -120,6 +120,15 @@ class ReferenceService:
         )
         return ref
 
+    def update(self, ref_id: int, *, note: str) -> Reference:
+        with self._db.transaction() as uow:
+            ref = uow.references.get(ref_id)
+            if ref is None:
+                raise NotFoundError(f"no reference with id {ref_id!r}")
+            ref.note = note
+            uow.references.update(ref)
+            return ref
+
     def delete(self, ref_id: int) -> None:
         with self._db.transaction() as uow:
             if uow.references.get(ref_id) is None:
