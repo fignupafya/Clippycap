@@ -35,6 +35,10 @@
   let editingTagId = $state<number | null>(null);
   let tagImageRef = $state<string | null>(null);
   let uploadingImg = $state(false);
+  // per-note tag dropdown (only one open at a time)
+  let tagDropdownNoteId = $state<number | null>(null);
+  let tagDropdownSearch = $state('');
+  let tagDropdownInput = $state<HTMLInputElement>();
   let videoEl = $state<HTMLVideoElement>();
   let timelineEl = $state<HTMLDivElement>();
   let dragging = $state<'in' | 'out' | 'play' | null>(null);
@@ -279,6 +283,26 @@
   async function removeTagFromNote(n: Note, tagId: number) {
     try { await api.setNoteTags(n.id, n.tag_ids.filter((x) => x !== tagId)); await refreshDetail(); } catch (e) { window.alert(String(e)); }
   }
+  function openTagDropdown(noteId: number) {
+    tagDropdownNoteId = noteId; tagDropdownSearch = '';
+    setTimeout(() => tagDropdownInput?.focus(), 0);            // input only exists once the dropdown renders
+  }
+  function closeTagDropdown() { tagDropdownNoteId = null; tagDropdownSearch = ''; }
+  function toggleTagDropdown(noteId: number) { if (tagDropdownNoteId === noteId) closeTagDropdown(); else openTagDropdown(noteId); }
+  async function pickTag(n: Note, tagId: number) { closeTagDropdown(); await addTagToNote(n, tagId); }
+  function pickFirstMatch(n: Note) {
+    const q = tagDropdownSearch.trim().toLowerCase();
+    if (!q) return;
+    const m = tags.find((t) => !n.tag_ids.includes(t.id) && t.name.toLowerCase().includes(q));
+    if (m) void pickTag(n, m.id);
+  }
+  function onWindowPointerDown(e: PointerEvent) {
+    if (tagDropdownNoteId === null) return;
+    const target = e.target as HTMLElement | null;
+    if (!target) { closeTagDropdown(); return; }
+    if (target.closest('.tag-dropdown') || target.closest('.add-tag-btn')) return;
+    closeTagDropdown();
+  }
   // Adding ~half a frame keeps the seek target solidly inside that frame's presentation window, so
   // millisecond rounding (in the stored timestamp, or after a trim's shift) can't land us a frame early.
   function frameNudge(): number { return Math.min(0.5 / Math.max(1, fps), 0.05); }
@@ -390,7 +414,7 @@
   function hideBrokenImg(e: Event) { (e.currentTarget as HTMLImageElement).style.display = 'none'; }
 </script>
 
-<svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} />
+<svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} onpointerdown={onWindowPointerDown} />
 
 <div class="app">
   <header>
@@ -561,21 +585,40 @@
         <textarea class="field" rows="5" bind:value={generalNoteText} onblur={saveGeneralNote}></textarea>
         <h4>Timestamped notes</h4>
         {#each d.timestamped_notes as n (n.id)}
+          {@const available = tags.filter((t) => !n.tag_ids.includes(t.id))}
           <div class="tsn">
             <button class="ts" onclick={() => seek(n.timestamp_ms ?? 0)} title="seek here">{n.end_timestamp_ms != null ? `${fmt(n.timestamp_ms ?? 0)}–${fmt(n.end_timestamp_ms)}` : fmt(n.timestamp_ms ?? 0)}</button>
+            {#if available.length > 0}
+              <div class="tagpicker">
+                <button class="add-tag-btn" onclick={() => toggleTagDropdown(n.id)} title="add a tag">🏷</button>
+                {#if tagDropdownNoteId === n.id}
+                  {@const matches = available.filter((t) => t.name.toLowerCase().includes(tagDropdownSearch.toLowerCase()))}
+                  <div class="tag-dropdown">
+                    <input class="field tag-dd-search" bind:value={tagDropdownSearch} bind:this={tagDropdownInput}
+                           placeholder="search tags…"
+                           onkeydown={(e) => { if (e.key === 'Escape') closeTagDropdown(); else if (e.key === 'Enter') pickFirstMatch(n); }} />
+                    <div class="tag-dd-list">
+                      {#each matches as t (t.id)}
+                        <button class="tag-dd-item" onclick={() => pickTag(n, t.id)}><span class="sw" style:background={t.color}></span> {@render tagFace(t)} {t.name}</button>
+                      {/each}
+                      {#if matches.length === 0}<div class="faint" style:padding="8px 10px" style:font-size="12px">no matches</div>{/if}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {/if}
             <span class="body">{n.body}</span>
             <button class="x" onclick={() => retimeNote(n)} title="move to {fmt(curMs)}">↻</button>
             <button class="x" onclick={() => deleteNote(n.id)} title="delete">🗑</button>
           </div>
-          <div class="tsntags">
-            {#each n.tag_ids as id (id)}
-              {@const t = tagById.get(id)}
-              {#if t}<span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name} <button class="x" onclick={() => removeTagFromNote(n, t.id)}>×</button></span>{/if}
-            {/each}
-            {#each tags.filter((t) => !n.tag_ids.includes(t.id)) as t (t.id)}
-              <button class="tagchip ntag" onclick={() => addTagToNote(n, t.id)}>+ {@render tagFace(t)} {t.name}</button>
-            {/each}
-          </div>
+          {#if n.tag_ids.length > 0}
+            <div class="tsntags">
+              {#each n.tag_ids as id (id)}
+                {@const t = tagById.get(id)}
+                {#if t}<span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name} <button class="x" onclick={() => removeTagFromNote(n, t.id)}>×</button></span>{/if}
+              {/each}
+            </div>
+          {/if}
         {/each}
         {#if d.timestamped_notes.length === 0}<span class="faint">none yet — use “+ note @ now”</span>{/if}
         <h4>References</h4>
@@ -686,6 +729,19 @@
   .tsn .body { flex: 1; font-size: 13px; }
   .tsntags { display: flex; flex-wrap: wrap; gap: 4px; margin: -2px 0 9px; padding-left: 2px; }
   .tagchip.ntag { font-size: 10px; padding: 1px 6px; }
+  .tagpicker { position: relative; display: inline-block; }
+  .add-tag-btn { background: transparent; border: none; padding: 0 4px; font-size: 13px; line-height: 1; cursor: pointer; color: var(--text-3); }
+  .add-tag-btn:hover { color: var(--accent); }
+  .tag-dropdown { position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 30; width: 220px; max-height: 250px;
+                  background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px;
+                  box-shadow: 0 6px 22px rgba(0,0,0,.5); display: flex; flex-direction: column; overflow: hidden; }
+  .tag-dd-search { margin: 6px 6px 0; padding: 4px 7px; font-size: 12px; }
+  .tag-dd-list { overflow-y: auto; padding: 4px; flex: 1; min-height: 0; }
+  .tag-dd-item { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left;
+                 padding: 5px 7px; border-radius: 5px; font-size: 12px; color: var(--text);
+                 background: transparent; border: none; cursor: pointer; }
+  .tag-dd-item:hover { background: var(--bg-2); }
+  .tag-dd-item .sw { width: 10px; height: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,.13); flex: none; }
   .card.sel { outline: 2.5px solid var(--accent); outline-offset: -2px; }
   .selbox { position: absolute; left: 6px; top: 6px; width: 18px; height: 18px; border-radius: 4px; border: 2px solid rgba(255,255,255,.55); background: rgba(0,0,0,.45); display: grid; place-items: center; font-size: 12px; font-weight: 900; color: #fff; opacity: 0; pointer-events: none; transition: opacity .1s; }
   .thumb:hover .selbox, .selbox.on { opacity: 1; pointer-events: auto; }
