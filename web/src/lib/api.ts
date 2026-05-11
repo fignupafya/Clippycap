@@ -20,6 +20,13 @@ export interface Tag {
   id: number; name: string; color: string; icon: string | null; image_ref: string | null;
   description: string; sort_order: number; asset_count?: number;
 }
+export interface ReferenceType { id: number; name: string; reverse_name: string | null; color: string; sort_order: number; }
+export interface ReferenceView {
+  id: number; from_asset_id: number; to_asset_id: number;
+  type_id: number | null; type_name: string | null; label: string; note: string;
+  from_timestamp_ms: number | null; to_timestamp_ms: number | null;
+  other_asset_id: number; other_asset_title: string;
+}
 export interface Source { id: number; path: string; recursive: boolean; enabled: boolean; media_types: string[]; last_scanned_at: string | null; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }
 export interface Health { name: string; ffmpeg: boolean; media_types: string[]; plugins: string[]; }
@@ -87,6 +94,12 @@ export const api = {
   addTimestampNote: (assetId: number, timestamp_ms: number, body: string, end_timestamp_ms?: number) =>
     req<Note>('POST', `/api/assets/${assetId}/notes`, { timestamp_ms, body, end_timestamp_ms }),
   deleteNote: (id: number) => req<void>('DELETE', `/api/notes/${id}`),
+  updateNote: (id: number, body: string) => req<Note>('PATCH', `/api/notes/${id}`, { body }),
+  listReferenceTypes: () => req<ReferenceType[]>('GET', '/api/reference-types'),
+  getReferences: (assetId: number) => req<{ outgoing: ReferenceView[]; incoming: ReferenceView[] }>('GET', `/api/assets/${assetId}/references`),
+  addReference: (body: { from_asset_id: number; to_asset_id: number; type_id?: number | null; label?: string; note?: string; from_timestamp_ms?: number | null; to_timestamp_ms?: number | null }) =>
+    req<{ id: number }>('POST', '/api/references', body),
+  deleteReference: (id: number) => req<void>('DELETE', `/api/references/${id}`),
   setNoteTags: (noteId: number, tag_ids: number[]) => req<void>('PUT', `/api/notes/${noteId}/tags`, { tag_ids }),
   retimeNote: (noteId: number, timestamp_ms: number, end_timestamp_ms?: number) =>
     req<Note>('PUT', `/api/notes/${noteId}/time`, { timestamp_ms, end_timestamp_ms }),
