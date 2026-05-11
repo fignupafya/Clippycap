@@ -20,7 +20,7 @@ from clippycap.core.entities import Asset, Reference
 from clippycap.core.errors import ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.events import AssetUpdated, EventBus
 from clippycap.core.ports import Database, IdentityStrategy, MediaTypeProvider, UnitOfWork, VideoEditor
-from clippycap.infra.config import Config
+from clippycap.infra.config import Config, ConfigHolder
 from clippycap.infra.media.video_thumbnail import purge_asset_thumbnails
 
 _log = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ class EditingService:
         media_types: dict[str, MediaTypeProvider],
         identity_strategies: dict[str, IdentityStrategy],
         event_bus: EventBus,
-        config: Config,
+        config_holder: ConfigHolder,
         thumbnail_dir: Path,
     ) -> None:
         self._db = database
@@ -46,8 +46,12 @@ class EditingService:
         self._media_types = media_types
         self._identity = identity_strategies
         self._bus = event_bus
-        self._config = config
+        self._config_holder = config_holder        # read [editing] / [thumbnails] live (see ConfigHolder)
         self._thumb_dir = thumbnail_dir
+
+    @property
+    def _config(self) -> Config:
+        return self._config_holder.current
 
     @property
     def available(self) -> bool:

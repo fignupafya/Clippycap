@@ -23,7 +23,7 @@ from clippycap.app.services import AssetService, NoteService, TagService
 from clippycap.app.source_service import SavedViewService, SourceService
 from clippycap.core.entities import ReferenceType
 from clippycap.core.ports import MetadataExtractor, Thumbnailer, VideoEditor
-from clippycap.infra.config import Config, load_config
+from clippycap.infra.config import Config, ConfigHolder, load_config
 from clippycap.infra.config.loader import default_install_dir
 from clippycap.infra.db.database import SqliteDatabase
 from clippycap.infra.media.ffmpeg import resolve_ffmpeg_tools
@@ -48,7 +48,7 @@ TAG_IMAGES_DIRNAME = "tag-images"
 class Application:
     """A fully wired application instance -- handed to the HTTP layer and the desktop shell."""
 
-    config: Config
+    config_holder: ConfigHolder
     database: SqliteDatabase
     event_bus: InProcessEventBus
     registries: Registries
@@ -69,6 +69,11 @@ class Application:
     tag_images_dir: Path
     install_dir: Path
     ffmpeg_available: bool
+
+    @property
+    def config(self) -> Config:
+        """The currently active :class:`Config` (mutable via :class:`ConfigService`)."""
+        return self.config_holder.current
 
     def shutdown(self) -> None:
         self.jobs.shutdown()
@@ -152,23 +157,22 @@ def build_application(
     )
     jobs = ThreadJobQueue()
 
+    config_holder = ConfigHolder(config)
     if ffmpeg_path is not None:
-        video_editor: VideoEditor = FfmpegVideoEditor(
-            ffmpeg_path, reencode=config.editing.reencode,
-            crf=config.editing.reencode_crf, preset=config.editing.reencode_preset,
-        )
+        video_editor: VideoEditor = FfmpegVideoEditor(ffmpeg_path, config_holder=config_holder)
     else:
         video_editor = UnavailableVideoEditor()
     editing_service = EditingService(
         database, video_editor, dict(registries.media_types.items()),
-        dict(registries.identity_strategies.items()), event_bus, config, thumbnail_dir,
+        dict(registries.identity_strategies.items()), event_bus, config_holder, thumbnail_dir,
     )
     config_service = ConfigService(
-        default_toml_path=default_toml_path, data_dir=data_dir, install_dir=install_dir, env=env,
+        holder=config_holder, default_toml_path=default_toml_path,
+        data_dir=data_dir, install_dir=install_dir, env=env,
     )
 
     return Application(
-        config=config, database=database, event_bus=event_bus, registries=registries, jobs=jobs,
+        config_holder=config_holder, database=database, event_bus=event_bus, registries=registries, jobs=jobs,
         assets=AssetService(database, event_bus, thumbnail_dir), tags=TagService(database, event_bus, tag_images_dir),
         notes=NoteService(database, event_bus), references=ReferenceService(database, event_bus),
         reference_types=ReferenceTypeService(database), sources=SourceService(database, event_bus),
