@@ -82,7 +82,7 @@ class EditingService:
                 out_path.unlink(missing_ok=True)
                 raise UnsupportedError("the video edit failed -- see the logs")
             new_asset = self._register_file(uow, out_path, asset.media_type, provider)
-            self._link_excerpt(uow, new_asset, asset)
+            self._link_excerpt(uow, new_asset, asset, start_ms)
         if remove_from_source:
             self.remove_segment(asset_id, start_ms=start_ms, end_ms=end_ms)
         return new_asset
@@ -267,13 +267,11 @@ class EditingService:
                                 metadata=metadata)
         return asset
 
-    def _link_excerpt(self, uow: UnitOfWork, child: Asset, parent: Asset) -> None:
-        type_name = self._config.editing.excerpt_reference_type
-        if not type_name or child.id is None or parent.id is None or child.id == parent.id:
+    def _link_excerpt(self, uow: UnitOfWork, child: Asset, parent: Asset, source_start_ms: int) -> None:
+        label = self._config.editing.excerpt_reference_type     # a plain description now, not a reference type
+        if not label or child.id is None or parent.id is None or child.id == parent.id:
             return
-        ref_type = uow.reference_types.get_by_name(type_name)
         uow.references.add(Reference(
-            from_asset_id=child.id, to_asset_id=parent.id,
-            type_id=ref_type.id if ref_type is not None else None,
-            label="" if ref_type is not None else type_name,
+            from_asset_id=child.id, to_asset_id=parent.id, type_id=None, note=label,
+            to_timestamp_ms=source_start_ms,        # the excerpt starts here in the source
         ))

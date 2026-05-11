@@ -131,7 +131,7 @@ keep_original_backup   = false
 # Name for the new clip produced by "save segment as new clip" / "cut segment to new clip".
 # Placeholders: {stem} {start} {end} {ext}  — {start} and {end} are formatted "mm-ss".
 new_clip_name_template = "{stem} [{start}-{end}]{ext}"
-# Reference type (by name) that links an extracted clip back to its source clip; "" disables it.
+# Description shown on the reference auto-created from an extracted clip back to its source; "" disables it.
 excerpt_reference_type = "excerpt of"
 
 [keybindings]

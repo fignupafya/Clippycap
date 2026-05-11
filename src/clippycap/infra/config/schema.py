@@ -123,7 +123,8 @@ class EditingConfig(_Section):
     # Name for the new clip produced by save/cut-segment. Placeholders: {stem} {start} {end} {ext}
     # ({start}/{end} formatted as "mm-ss").
     new_clip_name_template: str = Field(min_length=1)
-    # Reference type (by name) auto-linking an extracted clip to its source; "" => don't create one.
+    # Description shown on the reference auto-created from an extracted clip back to its source; "" => no link.
+    # (The name is kept for back-compat with existing local.toml files; it's a plain label now, not a type.)
     excerpt_reference_type: str
 
 
