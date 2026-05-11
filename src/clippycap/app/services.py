@@ -10,13 +10,14 @@ are in their own modules.)
 from __future__ import annotations
 
 import contextlib
+import re
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from clippycap.core.entities import Asset, AssetPath, Note, Tag
+from clippycap.core.entities import Asset, AssetPath, Note, Reference, Tag
 from clippycap.core.errors import ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.events import (
     AssetOpened,
@@ -32,9 +33,14 @@ from clippycap.core.events import (
     TagUnapplied,
     TagUpdated,
 )
-from clippycap.core.ports import Database
+from clippycap.core.ports import Database, UnitOfWork
 from clippycap.core.query import AssetFilter
 from clippycap.infra.media.video_thumbnail import purge_asset_thumbnails
+
+# Note bodies may embed "@{<asset id>}" tokens (inserted by the UI's @-mention picker). They turn a
+# note into a cross-reference: when such a note is saved, a Reference to the mentioned clip is created.
+MENTION_RE = re.compile(r"@\{(\d+)\}")
+
 
 # --------------------------------------------------------------------------- result types
 
@@ -69,6 +75,7 @@ class AssetDetail:
     paths: list[AssetPath]
     general_note: Note | None
     timestamped_notes: list[NoteView]
+    mentioned: dict[int, str]      # asset ids @-mentioned anywhere in this asset's notes -> their titles
 
 
 def _require[T](value: T | None, what: str, key: object) -> T:
@@ -111,13 +118,22 @@ class AssetService:
             tag_ids = uow.tags.tag_ids_for_asset(asset_id)
             paths = uow.assets.get_paths(asset_id)
             general = uow.notes.general_note(asset_id)
+            all_notes = uow.notes.list_for_asset(asset_id)
             timestamped = [
                 NoteView(note=n, tag_ids=uow.notes.tag_ids_for_note(n.id))
-                for n in uow.notes.list_for_asset(asset_id)
+                for n in all_notes
                 if n.timestamp_ms is not None and n.id is not None
             ]
+            mentioned: dict[int, str] = {}
+            for note in all_notes:
+                for raw in MENTION_RE.findall(note.body):
+                    mid = int(raw)
+                    if mid != asset_id and mid not in mentioned:
+                        other = uow.assets.get(mid)
+                        mentioned[mid] = other.title if other is not None else "(deleted)"
         return AssetDetail(
-            asset=asset, tag_ids=tag_ids, paths=paths, general_note=general, timestamped_notes=timestamped
+            asset=asset, tag_ids=tag_ids, paths=paths, general_note=general,
+            timestamped_notes=timestamped, mentioned=mentioned,
         )
 
     def get(self, asset_id: int) -> Asset | None:
@@ -318,6 +334,19 @@ class NoteService:
         self._db = database
         self._bus = event_bus
 
+    def _sync_mention_refs(self, uow: UnitOfWork, asset_id: int, body: str, from_ts: int | None) -> None:
+        """Ensure a Reference exists from ``asset_id`` to every clip ``@{id}``-mentioned in ``body``."""
+        ids = {int(x) for x in MENTION_RE.findall(body)} - {asset_id}
+        if not ids:
+            return
+        have = {r.to_asset_id for r in uow.references.list_outgoing(asset_id)}
+        for mid in ids:
+            if mid in have or uow.assets.get(mid) is None:
+                continue
+            uow.references.add(
+                Reference(from_asset_id=asset_id, to_asset_id=mid, type_id=None, from_timestamp_ms=from_ts)
+            )
+
     def list_for_asset(self, asset_id: int) -> list[NoteView]:
         with self._db.transaction() as uow:
             _require(uow.assets.get(asset_id), "asset", asset_id)
@@ -339,6 +368,7 @@ class NoteService:
             else:
                 note = uow.notes.add(Note(asset_id=asset_id, body=body))
                 created = True
+            self._sync_mention_refs(uow, asset_id, body, None)
             tag_ids = uow.notes.tag_ids_for_note(note.id) if note.id is not None else []
         assert note.id is not None
         self._bus.publish(
@@ -359,6 +389,7 @@ class NoteService:
             note = uow.notes.add(Note(
                 asset_id=asset_id, body=body, timestamp_ms=timestamp_ms, end_timestamp_ms=end_timestamp_ms,
             ))
+            self._sync_mention_refs(uow, asset_id, body, timestamp_ms)
         assert note.id is not None
         self._bus.publish(NoteCreated(note_id=note.id, asset_id=asset_id))
         return NoteView(note=note, tag_ids=[])
@@ -368,6 +399,7 @@ class NoteService:
             note = _require(uow.notes.get(note_id), "note", note_id)
             note.body = body
             uow.notes.update(note)
+            self._sync_mention_refs(uow, note.asset_id, body, note.timestamp_ms)
             tag_ids = uow.notes.tag_ids_for_note(note_id)
         self._bus.publish(NoteUpdated(note_id=note_id, asset_id=note.asset_id))
         return NoteView(note=note, tag_ids=tag_ids)

@@ -111,6 +111,7 @@ def _detail_dict(detail: AssetDetail) -> dict[str, Any]:
         "general_note": detail.general_note.body if detail.general_note is not None else None,
         "general_note_id": detail.general_note.id if detail.general_note is not None else None,
         "timestamped_notes": [_note_dict(n) for n in detail.timestamped_notes],
+        "mentioned_assets": {str(k): v for k, v in detail.mentioned.items()},
     }
 
 
