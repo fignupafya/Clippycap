@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, ReferenceType, ReferenceView, Source, Tag } from './lib/api';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
@@ -26,6 +26,11 @@
   let bulkBusy = $state(false);
 
   let detail = $state<AssetDetail | null>(null);
+  let refs = $state<{ outgoing: ReferenceView[]; incoming: ReferenceView[] }>({ outgoing: [], incoming: [] });
+  let refTypes = $state<ReferenceType[]>([]);
+  let addingRef = $state(false);
+  let refClipQuery = $state('');
+  let refTypeId = $state('');
   let editingTitle = $state(false);
   let titleDraft = $state('');
   let titleInputEl = $state<HTMLInputElement>();
@@ -123,6 +128,7 @@
     void loadTags(); void loadSources();
     void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
     void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
+    void api.listReferenceTypes().then((t) => { refTypes = t; }).catch(() => { /* none */ });
   });
   $effect(() => { void loadAssets(); });
   $effect(() => { if (videoEl) videoEl.playbackRate = playbackRate; });
@@ -177,9 +183,16 @@
     const n = selected.size;
     void bulkRun('delete', (id) => api.deleteAsset(id, true), `Delete ${n} clip(s) AND their files from disk? This cannot be undone.`);
   }
-  async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); }
-  async function refreshDetail() { if (detail) detail = await api.getAsset(detail.id); }
-  function closeDetail() { detail = null; editingTitle = false; void loadAssets(); }
+  async function loadRefs() { if (!detail) { refs = { outgoing: [], incoming: [] }; return; } try { refs = await api.getReferences(detail.id); } catch { /* ignore */ } }
+  async function openDetail(a: AssetSummary) { detail = await api.getAsset(a.id); void api.markOpened(a.id); editingTitle = false; addingRef = false; await loadRefs(); }
+  async function openClip(id: number) { try { detail = await api.getAsset(id); void api.markOpened(id); editingTitle = false; addingRef = false; await loadRefs(); } catch (e) { window.alert(String(e)); } }
+  async function refreshDetail() { if (detail) { detail = await api.getAsset(detail.id); await loadRefs(); } }
+  function closeDetail() { detail = null; refs = { outgoing: [], incoming: [] }; editingTitle = false; addingRef = false; void loadAssets(); }
+  async function addRef(toId: number) {
+    if (!detail) return;
+    try { await api.addReference({ from_asset_id: detail.id, to_asset_id: toId, type_id: refTypeId ? Number(refTypeId) : null }); addingRef = false; refClipQuery = ''; await loadRefs(); } catch (e) { window.alert(String(e)); }
+  }
+  async function deleteRef(id: number) { try { await api.deleteReference(id); await loadRefs(); } catch (e) { window.alert(String(e)); } }
   function startEditTitle() { if (!detail) return; titleDraft = detail.title; editingTitle = true; setTimeout(() => titleInputEl?.focus(), 0); }
   async function saveTitle() {
     if (!detail || !editingTitle) return;
@@ -742,7 +755,32 @@
         {/each}
         {#if d.timestamped_notes.length === 0}<span class="faint">none yet — use “+ note @ now”</span>{/if}
         <h4>References</h4>
-        <span class="faint">{d.reference_count} reference(s). Editing references (with relation types) is in the desktop UI mockup; this minimal build doesn't include it yet.</span>
+        {#each [...refs.outgoing.map((r) => ({ r, dir: '→' })), ...refs.incoming.map((r) => ({ r, dir: '←' }))] as { r, dir } (dir + r.id)}
+          <div class="refrow">
+            <span class="refdir">{dir}</span>
+            {#if r.type_name}<span class="reftype">{r.type_name}</span>{/if}
+            <button class="reflink" onclick={() => openClip(r.other_asset_id)} title="open this clip">{r.other_asset_title}</button>
+            {#if r.from_timestamp_ms != null}<span class="faint" style:font-size="10.5px">@ {fmt(r.from_timestamp_ms)}</span>{/if}
+            <span style:flex="1"></span>
+            <button class="x" onclick={() => deleteRef(r.id)} title="remove this reference">×</button>
+          </div>
+        {/each}
+        {#if refs.outgoing.length === 0 && refs.incoming.length === 0 && !addingRef}<span class="faint">no references yet — add one below, or @-mention a clip inside a note.</span>{/if}
+        {#if addingRef}
+          <div class="refadd">
+            <input class="field" placeholder="search clips…" bind:value={refClipQuery} />
+            <select bind:value={refTypeId}><option value="">— relation —</option>{#each refTypes as rt (rt.id)}<option value={rt.id}>{rt.name}</option>{/each}</select>
+            <button class="btn sm" onclick={() => { addingRef = false; refClipQuery = ''; }}>Cancel</button>
+            <div class="refadd-list">
+              {#each assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).slice(0, 14) as a (a.id)}
+                <button class="refadd-item" onclick={() => addRef(a.id)}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} /> {a.title}</button>
+              {/each}
+              {#if assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).length === 0}<div class="faint" style:padding="6px 8px" style:font-size="12px">no matching clips loaded</div>{/if}
+            </div>
+          </div>
+        {:else}
+          <button class="btn sm" style:margin-top="6px" onclick={() => { addingRef = true; refClipQuery = ''; }}>+ Add a reference</button>
+        {/if}
         <h4>File</h4>
         {#each d.paths as p (p.path)}<div class="src" class:miss={!p.present} title={p.path}>{p.present ? '✓' : '✗'} {p.path}</div>{/each}
         <button class="btn sm" style:margin-top="7px" onclick={renameFile}>✎ Rename the file on disk</button>
@@ -873,6 +911,18 @@
   .tagchip .n { font-family: ui-monospace, monospace; font-size: 10px; opacity: .6; }
   .src { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text-2); padding: 3px 0; word-break: break-all; }
   .src.miss { color: var(--text-3); text-decoration: line-through; }
+  .refrow { display: flex; align-items: center; gap: 6px; padding: 4px 0; font-size: 12.5px; }
+  .refdir { color: var(--text-3); font-weight: 700; flex: none; }
+  .reftype { font-size: 10.5px; color: var(--text-3); background: var(--bg-3); border-radius: 4px; padding: 1px 5px; white-space: nowrap; flex: none; }
+  .reflink { background: transparent; border: none; color: var(--accent); cursor: pointer; text-align: left; padding: 0; text-decoration: underline; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reflink:hover { color: #ffb482; }
+  .refadd { margin-top: 6px; padding: 8px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .refadd input.field { flex: 1; min-width: 110px; }
+  .refadd select { padding: 3px 6px; background: var(--bg-1); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }
+  .refadd-list { width: 100%; max-height: 210px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .refadd-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 4px 6px; border-radius: 5px; font-size: 12px; color: var(--text); background: transparent; border: none; cursor: pointer; }
+  .refadd-item:hover { background: var(--bg-3); }
+  .refadd-item img { width: 40px; height: 24px; object-fit: cover; border-radius: 3px; flex: none; background: #11141a; }
   main { flex: 1; overflow-y: auto; padding: 14px; min-width: 0; }
   .bar { color: var(--text-2); margin-bottom: 10px; }
   .err { background: #4a1d1d; border: 1px solid #6b2b2b; border-radius: 7px; padding: 8px 11px; margin-bottom: 10px; }
