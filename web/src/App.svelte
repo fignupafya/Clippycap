@@ -34,6 +34,12 @@
   let editingTitle = $state(false);
   let titleDraft = $state('');
   let titleInputEl = $state<HTMLInputElement>();
+  let mention = $state<{ el: HTMLTextAreaElement; queryStart: number; query: string; top: number; left: number; set: (s: string) => void } | null>(null);
+  let mentionPopup = $state<{ id: number; title: string; top: number; left: number } | null>(null);
+  let editingGeneralNote = $state(false);
+  let generalNoteEl = $state<HTMLTextAreaElement>();
+  let editNoteBodyId = $state<number | null>(null);
+  let noteBodyDraft = $state('');
   let scanJob = $state<{ scanned: number } | null>(null);
   let showTags = $state(false);
   let showKeys = $state(false);
@@ -286,7 +292,68 @@
   }
   async function saveGeneralNote() {
     if (!detail) return;
-    try { await api.setGeneralNote(detail.id, generalNoteText); } catch (e) { window.alert(String(e)); }
+    try { await api.setGeneralNote(detail.id, generalNoteText); await refreshDetail(); } catch (e) { window.alert(String(e)); }
+  }
+  // ---- @-mention: link another clip from inside a note ------------------
+  const _MIRROR_KEYS = ['fontFamily','fontSize','fontWeight','fontStyle','lineHeight','letterSpacing','textTransform','textAlign','paddingTop','paddingRight','paddingBottom','paddingLeft','borderTopWidth','borderRightWidth','borderBottomWidth','borderLeftWidth','boxSizing'] as const;
+  function caretCoords(el: HTMLTextAreaElement): { top: number; left: number } {
+    const cs = window.getComputedStyle(el);
+    const mirror = document.createElement('div');
+    for (const k of _MIRROR_KEYS) mirror.style[k] = cs[k];
+    Object.assign(mirror.style, { position: 'absolute', top: '-9999px', left: '-9999px', width: el.clientWidth + 'px', whiteSpace: 'pre-wrap', wordWrap: 'break-word', overflow: 'hidden' });
+    const caret = el.selectionStart ?? el.value.length;
+    mirror.textContent = el.value.slice(0, caret);
+    const marker = document.createElement('span');
+    marker.textContent = '​';
+    mirror.appendChild(marker);
+    document.body.appendChild(mirror);
+    const rect = el.getBoundingClientRect();
+    const lh = parseFloat(cs.lineHeight) || parseFloat(cs.fontSize) * 1.4 || 18;
+    const r = { top: rect.top + marker.offsetTop - el.scrollTop + lh, left: rect.left + marker.offsetLeft - el.scrollLeft };
+    document.body.removeChild(mirror);
+    return r;
+  }
+  function onMentionInput(e: Event, set: (s: string) => void) {
+    const el = e.currentTarget as HTMLTextAreaElement;
+    const caret = el.selectionStart ?? el.value.length;
+    const m = /(?:^|[\s(])@([\w-]*)$/.exec(el.value.slice(0, caret));
+    if (!m) { mention = null; return; }
+    const c = caretCoords(el);
+    mention = { el, queryStart: caret - m[1].length - 1, query: m[1].toLowerCase(), top: c.top, left: c.left, set };
+  }
+  function pickMention(clipId: number) {
+    if (!mention) return;
+    const { el, queryStart, query, set } = mention;
+    const token = `@{${clipId}} `;
+    const newText = el.value.slice(0, queryStart) + token + el.value.slice(queryStart + 1 + query.length);
+    const newCaret = queryStart + token.length;
+    mention = null;
+    set(newText);
+    setTimeout(() => { el.focus(); el.setSelectionRange(newCaret, newCaret); }, 0);
+  }
+  function closeMention() { mention = null; }
+  function splitMentions(body: string): { text: string; id: number | null }[] {
+    const out: { text: string; id: number | null }[] = [];
+    const re = /@\{(\d+)\}/g;
+    let last = 0, m: RegExpExecArray | null;
+    while ((m = re.exec(body)) !== null) {
+      if (m.index > last) out.push({ text: body.slice(last, m.index), id: null });
+      const id = Number(m[1]);
+      out.push({ text: detail?.mentioned_assets?.[String(id)] ?? `clip #${id}`, id });
+      last = m.index + m[0].length;
+    }
+    if (last < body.length || out.length === 0) out.push({ text: body.slice(last), id: null });
+    return out;
+  }
+  function showMentionPopup(e: MouseEvent, id: number, title: string) {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    mentionPopup = { id, title, top: r.bottom + 4, left: Math.max(8, r.left) };
+  }
+  function hideMentionPopup() { mentionPopup = null; }
+  function startEditNoteBody(n: Note) { editNoteBodyId = n.id; noteBodyDraft = n.body; mention = null; }
+  async function saveNoteBody(noteId: number) {
+    editNoteBodyId = null; mention = null;
+    try { await api.updateNote(noteId, noteBodyDraft); await refreshDetail(); } catch (e) { window.alert(String(e)); }
   }
   async function addNote(ms: number, endMs: number | null = null) {
     if (!detail) return;
@@ -352,11 +419,9 @@
     if (m) void pickTag(n, m.id);
   }
   function onWindowPointerDown(e: PointerEvent) {
-    if (tagDropdownNoteId === null) return;
     const target = e.target as HTMLElement | null;
-    if (!target) { closeTagDropdown(); return; }
-    if (target.closest('.tag-dropdown') || target.closest('.add-tag-btn')) return;
-    closeTagDropdown();
+    if (tagDropdownNoteId !== null && !(target && (target.closest('.tag-dropdown') || target.closest('.add-tag-btn')))) closeTagDropdown();
+    if (mention !== null && !(target && (target.closest('.mention-dropdown') || target === mention.el))) mention = null;
   }
   // Adding ~half a frame keeps the seek target solidly inside that frame's presentation window, so
   // millisecond rounding (in the stored timestamp, or after a trim's shift) can't land us a frame early.
@@ -714,7 +779,17 @@
           {/each}
         </div>
         <h4>General note</h4>
-        <textarea class="field" rows="5" bind:value={generalNoteText} onblur={saveGeneralNote}></textarea>
+        {#if editingGeneralNote}
+          <textarea class="field" rows="5" bind:value={generalNoteText} bind:this={generalNoteEl}
+                    oninput={(e) => onMentionInput(e, (s) => { generalNoteText = s; })}
+                    onkeydown={(e) => { if (e.key === 'Escape') { if (mention) closeMention(); else { editingGeneralNote = false; void saveGeneralNote(); } } }}
+                    onblur={() => { if (!mention) { editingGeneralNote = false; void saveGeneralNote(); } }}></textarea>
+        {:else}
+          <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+          <div class="note-display" onclick={() => { editingGeneralNote = true; setTimeout(() => generalNoteEl?.focus(), 0); }} title="click to edit — type @ to link another clip">
+            {#if generalNoteText.trim()}{@render noteBody(generalNoteText)}{:else}<span class="faint">add a note… (type @ to link a clip)</span>{/if}
+          </div>
+        {/if}
         <h4>Timestamped notes</h4>
         {#each d.timestamped_notes as n (n.id)}
           {@const available = tags.filter((t) => !n.tag_ids.includes(t.id))}
@@ -739,10 +814,19 @@
                 {/if}
               </div>
             {/if}
-            <span class="body">{n.body}</span>
-            <button class="x" onclick={() => retimeNote(n)} title="move to the current playhead ({fmt(curMs)})">↻</button>
-            <button class="x" onclick={() => editNoteTime(n)} title="type a new time">✏</button>
-            <button class="x" onclick={() => deleteNote(n.id)} title="delete">🗑</button>
+            {#if editNoteBodyId === n.id}
+              <textarea class="field notebody-edit" rows="2" bind:value={noteBodyDraft}
+                        oninput={(e) => onMentionInput(e, (s) => { noteBodyDraft = s; })}
+                        onkeydown={(e) => { if (e.key === 'Escape') { if (mention) closeMention(); else editNoteBodyId = null; } else if (e.key === 'Enter' && !e.shiftKey && !mention) { e.preventDefault(); void saveNoteBody(n.id); } }}></textarea>
+              <button class="x" onclick={() => saveNoteBody(n.id)} title="save">✔</button>
+              <button class="x" onclick={() => (editNoteBodyId = null)} title="cancel">×</button>
+            {:else}
+              <span class="body">{@render noteBody(n.body)}</span>
+              <button class="x" onclick={() => startEditNoteBody(n)} title="edit the text — type @ to link a clip">📝</button>
+              <button class="x" onclick={() => retimeNote(n)} title="move to the current playhead ({fmt(curMs)})">↻</button>
+              <button class="x" onclick={() => editNoteTime(n)} title="type a new time">✏</button>
+              <button class="x" onclick={() => deleteNote(n.id)} title="delete">🗑</button>
+            {/if}
           </div>
           {#if n.tag_ids.length > 0}
             <div class="tsntags">
@@ -808,6 +892,8 @@
 {/if}
 
 {#snippet tagFace(t: Tag)}{#if t.image_ref}<img class="tagimg" src="/api/tag-images/{t.image_ref}" alt="" />{:else if t.icon}{t.icon}{/if}{/snippet}
+{#snippet noteBody(body: string)}{#each splitMentions(body) as seg}{#if seg.id != null}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+<span class="mention" role="link" tabindex="0" onclick={() => openClip(seg.id ?? 0)} onmouseenter={(e) => showMentionPopup(e, seg.id ?? 0, seg.text)} onmouseleave={hideMentionPopup}>@{seg.text}</span>{:else}{seg.text}{/if}{/each}{/snippet}
 {#if showSettings && cfg}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) closeSettings(); }}>
@@ -889,6 +975,22 @@
   </div>
 {/if}
 
+{#if mention}
+  {@const matches = assets.filter((a) => a.title.toLowerCase().includes(mention.query)).slice(0, 10)}
+  <div class="mention-dropdown" style:top={mention.top + 'px'} style:left={mention.left + 'px'}>
+    {#each matches as a (a.id)}
+      <button class="mention-item" onmousedown={(e) => { e.preventDefault(); pickMention(a.id); }}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} /><span>{a.title}</span></button>
+    {/each}
+    {#if matches.length === 0}<div class="faint" style:padding="6px 8px" style:font-size="12px">no matching clips</div>{/if}
+  </div>
+{/if}
+{#if mentionPopup}
+  <div class="mention-popup" style:top={mentionPopup.top + 'px'} style:left={mentionPopup.left + 'px'}>
+    <img src="/thumbnails/{mentionPopup.id}" alt="" onerror={hideBrokenImg} />
+    <div class="mention-popup-title">{mentionPopup.title}</div>
+  </div>
+{/if}
+
 <style>
   .app { display: flex; flex-direction: column; height: 100%; }
   header { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 50px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
@@ -959,7 +1061,20 @@
   .side textarea { resize: vertical; }
   .tsn { display: flex; gap: 8px; align-items: flex-start; padding: 7px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; margin-bottom: 6px; }
   .tsn .ts { font-family: ui-monospace, monospace; font-size: 11.5px; font-weight: 700; color: var(--amber); background: rgba(240,179,79,.13); border: 1px solid rgba(240,179,79,.3); padding: 2px 6px; border-radius: 5px; flex: none; }
-  .tsn .body { flex: 1; font-size: 13px; }
+  .tsn .body { flex: 1; font-size: 13px; word-break: break-word; }
+  .note-display { white-space: pre-wrap; word-break: break-word; font-size: 13px; min-height: 44px; padding: 7px 9px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; cursor: text; line-height: 1.45; }
+  .note-display:hover { border-color: #3a4350; }
+  .mention { color: var(--accent); cursor: pointer; text-decoration: underline; font-weight: 600; }
+  .mention:hover { color: #ffb482; }
+  .notebody-edit { flex: 1; min-width: 110px; font-size: 12px; resize: vertical; }
+  .mention-dropdown { position: fixed; z-index: 70; width: 240px; max-height: 240px; overflow-y: auto; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.5); padding: 4px; }
+  .mention-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 4px 6px; border-radius: 5px; font-size: 12px; color: var(--text); background: transparent; border: none; cursor: pointer; }
+  .mention-item:hover { background: var(--bg-3); }
+  .mention-item img { width: 38px; height: 22px; object-fit: cover; border-radius: 3px; flex: none; background: #11141a; }
+  .mention-item span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mention-popup { position: fixed; z-index: 75; pointer-events: none; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.55); padding: 6px; width: 200px; }
+  .mention-popup img { width: 100%; aspect-ratio: 16/9; object-fit: cover; border-radius: 5px; background: #11141a; display: block; }
+  .mention-popup-title { font-size: 12px; font-weight: 600; margin-top: 5px; word-break: break-word; }
   .tsntags { display: flex; flex-wrap: wrap; gap: 4px; margin: -2px 0 9px; padding-left: 2px; }
   .tagchip.ntag { font-size: 10px; padding: 1px 6px; }
   .tagpicker { position: relative; display: inline-block; }

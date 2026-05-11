@@ -15,6 +15,7 @@ export interface Note {
 export interface AssetDetail extends AssetSummary {
   paths: { path: string; present: boolean; volume_id: string | null }[];
   general_note: string | null; general_note_id: number | null; timestamped_notes: Note[];
+  mentioned_assets: Record<string, string>;   // "@{id}"-mentioned clips in this asset's notes -> title
 }
 export interface Tag {
   id: number; name: string; color: string; icon: string | null; image_ref: string | null;
