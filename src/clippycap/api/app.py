@@ -193,6 +193,10 @@ class ReferenceBody(BaseModel):
     to_timestamp_ms: int | None = None
 
 
+class ReferenceUpdateBody(BaseModel):
+    note: str = ""
+
+
 class ReferenceTypeBody(BaseModel):
     name: str = Field(min_length=1)
     color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
@@ -521,6 +525,11 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
             to_timestamp_ms=body.to_timestamp_ms,
         )
         return {"id": ref.id}
+
+    @api.patch("/api/references/{reference_id}", status_code=204)
+    def update_reference(app: AppDep, reference_id: int, body: ReferenceUpdateBody) -> Response:
+        app.references.update(reference_id, note=body.note)
+        return Response(status_code=204)
 
     @api.delete("/api/references/{reference_id}", status_code=204)
     def delete_reference(app: AppDep, reference_id: int) -> Response:

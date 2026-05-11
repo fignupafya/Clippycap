@@ -548,6 +548,12 @@ class SqliteReferenceRepository(_Repo):
         row = self._c.execute("SELECT * FROM asset_references WHERE id = ?", (ref_id,)).fetchone()
         return _reference(row) if row else None
 
+    def update(self, ref: Reference) -> None:
+        self._c.execute(
+            "UPDATE asset_references SET type_id=?, label=?, note=?, from_timestamp_ms=?, to_timestamp_ms=? WHERE id=?",
+            (ref.type_id, ref.label, ref.note, ref.from_timestamp_ms, ref.to_timestamp_ms, ref.id),
+        )
+
     def delete(self, ref_id: int) -> None:
         self._c.execute("DELETE FROM asset_references WHERE id = ?", (ref_id,))
 

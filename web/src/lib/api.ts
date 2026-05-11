@@ -30,6 +30,7 @@ export interface ReferenceView {
   other_asset_id: number; other_asset_title: string; to_note_body: string | null;
 }
 export interface Source { id: number; path: string; recursive: boolean; enabled: boolean; media_types: string[]; last_scanned_at: string | null; }
+export interface SavedView { id: number; name: string; filter_json: string; sort_key: string; sort_order: number; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }
 export interface Health { name: string; ffmpeg: boolean; media_types: string[]; plugins: string[]; }
 export interface EditingConfig {
@@ -101,7 +102,12 @@ export const api = {
   getReferences: (assetId: number) => req<{ outgoing: ReferenceView[]; incoming: ReferenceView[] }>('GET', `/api/assets/${assetId}/references`),
   addReference: (body: { from_asset_id: number; to_asset_id: number; type_id?: number | null; label?: string; note?: string; from_timestamp_ms?: number | null; to_timestamp_ms?: number | null }) =>
     req<{ id: number }>('POST', '/api/references', body),
+  updateReference: (id: number, note: string) => req<void>('PATCH', `/api/references/${id}`, { note }),
   deleteReference: (id: number) => req<void>('DELETE', `/api/references/${id}`),
+  listSavedViews: () => req<SavedView[]>('GET', '/api/saved-views'),
+  createSavedView: (v: { name: string; filter_json: string; sort_key: string; sort_order?: number }) =>
+    req<{ id: number }>('POST', '/api/saved-views', v),
+  deleteSavedView: (id: number) => req<void>('DELETE', `/api/saved-views/${id}`),
   setNoteTags: (noteId: number, tag_ids: number[]) => req<void>('PUT', `/api/notes/${noteId}/tags`, { tag_ids }),
   retimeNote: (noteId: number, timestamp_ms: number, end_timestamp_ms?: number) =>
     req<Note>('PUT', `/api/notes/${noteId}/time`, { timestamp_ms, end_timestamp_ms }),
