@@ -1107,7 +1107,7 @@
             <input type="checkbox" bind:checked={pendingEditing.keep_original_backup} /></label>
           <label class="srow"><span class="slabel">New-clip name template <span class="faint" style:font-size="11px">{`{stem} {start} {end} {ext}`}</span></span>
             <input class="field" type="text" bind:value={pendingEditing.new_clip_name_template} /></label>
-          <label class="srow"><span class="slabel">Excerpt reference type</span>
+          <label class="srow"><span class="slabel">Reference label for extracted clips <span class="faint" style:font-size="11px">("save / cut to new clip")</span></span>
             <input class="field" type="text" bind:value={pendingEditing.excerpt_reference_type} /></label>
           <p class="faint" style:font-size="12px" style:margin-top="10px">All editing settings apply right away — on the very next trim / cut / extract.</p>
         {:else if settingsTab === 'player' && pendingPlayer}
