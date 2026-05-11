@@ -632,15 +632,14 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     @api.put("/api/config")
     def update_config(app: AppDep, body: ConfigPatchBody) -> dict[str, Any]:
         # Pydantic has already validated each section against its EditingConfig / PlayerConfig
-        # schema; ConfigService writes local.toml + reloads (and rolls back local.toml on a failing
-        # cross-section validation). We then swap app.config for the new one so GET /api/config and
-        # the frontend pick it up.
+        # schema. ConfigService writes local.toml + reloads (and rolls back local.toml on a failing
+        # cross-section validation), then swaps the shared ConfigHolder so the ffmpeg editor and the
+        # editing service read the new values on their very next call -- no restart needed.
         new_config = app.config_service.update(
             editing=body.editing.model_dump(mode="python") if body.editing else None,
             player=body.player.model_dump(mode="python") if body.player else None,
             keybindings=body.keybindings,
         )
-        app.config = new_config
         return new_config.model_dump(mode="json")
 
     @api.get("/api/plugins")

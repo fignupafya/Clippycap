@@ -15,6 +15,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from clippycap.infra.config import ConfigHolder
+
 _log = logging.getLogger(__name__)
 _EDIT_TIMEOUT = 600  # seconds -- re-encoding a long clip can take a while
 _TRIM_START_BELOW = 0.05  # "remove" with a head shorter than this is treated as "trim the start"
@@ -23,26 +25,26 @@ _TRIM_START_BELOW = 0.05  # "remove" with a head shorter than this is treated as
 class FfmpegVideoEditor:
     available = True
 
-    def __init__(self, ffmpeg_path: Path, *, reencode: bool, crf: int, preset: str) -> None:
+    def __init__(self, ffmpeg_path: Path, *, config_holder: ConfigHolder) -> None:
         self._ffmpeg = ffmpeg_path
-        self._reencode = reencode
-        self._crf = crf
-        self._preset = preset
+        self._config_holder = config_holder        # read [editing] live, so PUT /api/config takes effect at once
 
     _MP4_LIKE = (".mp4", ".m4v", ".mov", ".m4a")
 
     def _codec_args(self) -> list[str]:
-        if self._reencode:
+        e = self._config_holder.current.editing
+        if e.reencode:
             # passthrough keeps each frame's source timestamp, so the cut's frame timing matches the
             # original exactly (timestamped notes line up after a trim).
-            return ["-c:v", "libx264", "-crf", str(self._crf), "-preset", self._preset,
+            return ["-c:v", "libx264", "-crf", str(e.reencode_crf), "-preset", e.reencode_preset,
                     "-fps_mode:v", "passthrough", "-c:a", "aac"]
         return ["-c", "copy"]
 
     def _seek_in(self, seconds: float) -> list[str]:
         # On a stream copy, "inaccurate" seeking snaps to a keyframe instead of leaving an mp4 edit
         # list behind -- browsers (unlike VLC/mpv) won't play a clip that has one.
-        return ["-ss", f"{seconds:.3f}", *([] if self._reencode else ["-noaccurate_seek"])]
+        return ["-ss", f"{seconds:.3f}",
+                *([] if self._config_holder.current.editing.reencode else ["-noaccurate_seek"])]
 
     def _web_flags(self, out_path: Path) -> list[str]:
         flags = ["-avoid_negative_ts", "make_zero"]                 # output timestamps start at 0
@@ -108,7 +110,8 @@ class FfmpegVideoEditor:
         # Ask ffmpeg what the *first frame* its seek to requested_ms lands on is (re-encode: the first
         # frame >= requested_ms; stream copy: the keyframe <= requested_ms) -- showinfo prints its pts.
         req_s = max(0.0, requested_ms / 1000.0)
-        args = ["-ss", f"{req_s:.3f}", *([] if self._reencode else ["-noaccurate_seek"]),
+        args = ["-ss", f"{req_s:.3f}",
+                *([] if self._config_holder.current.editing.reencode else ["-noaccurate_seek"]),
                 "-i", str(source), "-vf", "showinfo", "-frames:v", "1", "-f", "null", "-"]
         try:
             done = subprocess.run([str(self._ffmpeg), "-hide_banner", "-loglevel", "info", *args],

@@ -18,7 +18,7 @@ from typing import Any
 
 import tomli_w
 
-from clippycap.infra.config import LOCAL_FILENAME, Config, ConfigError, load_config
+from clippycap.infra.config import LOCAL_FILENAME, Config, ConfigError, ConfigHolder, load_config
 
 _log = logging.getLogger(__name__)
 
@@ -29,11 +29,13 @@ class ConfigService:
     def __init__(
         self,
         *,
+        holder: ConfigHolder,
         default_toml_path: Path,
         data_dir: Path,
         install_dir: Path,
         env: Mapping[str, str] | None,
     ) -> None:
+        self._holder = holder           # swapped after a successful update so live services see the new values
         self._default_toml_path = default_toml_path
         self._data_dir = data_dir
         self._install_dir = install_dir
@@ -76,6 +78,7 @@ class ConfigService:
             # roll back so the running app stays valid
             self._write_local(previous)
             raise
+        self._holder.current = config       # live: the ffmpeg editor + the editing service see this on the next call
         _log.info("config updated (%s)", ", ".join(sections) if sections else "<no changes>")
         return config
 
