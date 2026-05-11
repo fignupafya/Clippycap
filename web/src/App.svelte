@@ -37,6 +37,8 @@
   let refClipQuery = $state('');
   let refPickedId = $state<number | null>(null);
   let refPickedTitle = $state('');
+  let refPickedNoteMs = $state<number | null>(null);   // a moment in the picked clip (null = the whole clip)
+  let refPickedClipNotes = $state<{ id: number; body: string; timestamp_ms: number }[] | null>(null);  // null = loading
   let refDesc = $state('');
   let editingRefId = $state<number | null>(null);
   let refDescDraft = $state('');
@@ -272,9 +274,18 @@
   function openClip(id: number) { navTo(id); }
   function closeDetail() { navTo(null); }
   async function refreshDetail() { if (detail) { detail = await api.getAsset(detail.id); await loadRefs(); } }
+  function resetRefAdd() { addingRef = false; refPickedId = null; refPickedTitle = ''; refPickedNoteMs = null; refPickedClipNotes = null; refDesc = ''; refClipQuery = ''; }
+  async function pickRefClip(a: AssetSummary) {
+    refPickedId = a.id; refPickedTitle = a.title; refPickedNoteMs = null; refPickedClipNotes = null;
+    try { const d = await api.getAsset(a.id); if (refPickedId === a.id) refPickedClipNotes = d.timestamped_notes.map((n) => ({ id: n.id, body: n.body, timestamp_ms: n.timestamp_ms ?? 0 })); }
+    catch { if (refPickedId === a.id) refPickedClipNotes = []; }
+  }
   async function addRef() {
     if (!detail || refPickedId === null) return;
-    try { await api.addReference({ from_asset_id: detail.id, to_asset_id: refPickedId, note: refDesc.trim() || undefined }); addingRef = false; refPickedId = null; refDesc = ''; refClipQuery = ''; await loadRefs(); } catch (e) { toast(String(e), 'error'); }
+    try {
+      await api.addReference({ from_asset_id: detail.id, to_asset_id: refPickedId, note: refDesc.trim() || undefined, to_timestamp_ms: refPickedNoteMs ?? undefined });
+      resetRefAdd(); await loadRefs();
+    } catch (e) { toast(String(e), 'error'); }
   }
   async function deleteRef(id: number) { try { await api.deleteReference(id); await loadRefs(); } catch (e) { toast(String(e), 'error'); } }
   function startEditRefDesc(r: ReferenceView) { editingRefId = r.id; refDescDraft = r.note || r.label || ''; setTimeout(() => refDescEl?.focus(), 0); }
@@ -987,22 +998,32 @@
               <input class="field" style:width="100%" placeholder="search clips to reference…" bind:value={refClipQuery} />
               <div class="refadd-list">
                 {#each assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).slice(0, 14) as a (a.id)}
-                  <button class="refadd-item" onclick={() => { refPickedId = a.id; refPickedTitle = a.title; }}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} />{a.title}</button>
+                  <button class="refadd-item" onclick={() => pickRefClip(a)}><img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} />{a.title}</button>
                 {/each}
                 {#if assets.filter((a) => a.id !== d.id && a.title.toLowerCase().includes(refClipQuery.toLowerCase())).length === 0}<div class="faint" style:padding="6px 8px" style:font-size="12px">no matching clips loaded</div>{/if}
               </div>
-              <button class="btn sm" onclick={() => { addingRef = false; refClipQuery = ''; }}>Cancel</button>
+              <button class="btn sm" onclick={resetRefAdd}>Cancel</button>
             {:else}
-              <div class="ref-picked"><img src="/thumbnails/{refPickedId}" alt="" onerror={hideBrokenImg} /><b>{refPickedTitle}</b><button class="x" onclick={() => (refPickedId = null)} title="pick a different clip">change</button></div>
+              <div class="ref-picked"><img src="/thumbnails/{refPickedId}" alt="" onerror={hideBrokenImg} /><b>{refPickedTitle}</b><button class="x" onclick={() => { refPickedId = null; refPickedNoteMs = null; refPickedClipNotes = null; }} title="pick a different clip">change</button></div>
+              {#if refPickedClipNotes === null}
+                <div class="faint" style:width="100%" style:font-size="11.5px">loading the clip's moments…</div>
+              {:else if refPickedClipNotes.length > 0}
+                <div class="ref-moment-pick">
+                  <button class="ref-moment-opt" class:on={refPickedNoteMs === null} onclick={() => (refPickedNoteMs = null)}>— whole clip —</button>
+                  {#each refPickedClipNotes as n (n.id)}
+                    <button class="ref-moment-opt" class:on={refPickedNoteMs === n.timestamp_ms} onclick={() => (refPickedNoteMs = n.timestamp_ms)}><span class="ts-badge">{fmt(n.timestamp_ms)}</span> {n.body || '(no text)'}</button>
+                  {/each}
+                </div>
+              {/if}
               <textarea class="field" rows="2" placeholder="description (optional)" bind:value={refDesc}></textarea>
               <div class="refadd-actions">
                 <button class="btn sm primary" onclick={addRef}>Add reference</button>
-                <button class="btn sm" onclick={() => { addingRef = false; refPickedId = null; refDesc = ''; refClipQuery = ''; }}>Cancel</button>
+                <button class="btn sm" onclick={resetRefAdd}>Cancel</button>
               </div>
             {/if}
           </div>
         {:else}
-          <button class="btn sm" style:margin-top="6px" onclick={() => { addingRef = true; refPickedId = null; refDesc = ''; refClipQuery = ''; }}>+ Add a reference</button>
+          <button class="btn sm" style:margin-top="6px" onclick={() => { resetRefAdd(); addingRef = true; }}>+ Add a reference</button>
         {/if}
         <h4>Clips referencing this one</h4>
         {#each refs.incoming as r (r.id)}{@render refCard(r, false)}{/each}
@@ -1243,6 +1264,10 @@
   .ref-picked img { width: 52px; aspect-ratio: 16/9; object-fit: cover; border-radius: 4px; flex: none; background: #11141a; }
   .ref-picked b { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .refadd-actions { display: flex; gap: 6px; width: 100%; }
+  .ref-moment-pick { width: 100%; max-height: 160px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px; }
+  .ref-moment-opt { display: flex; align-items: center; gap: 6px; width: 100%; text-align: left; padding: 4px 6px; border-radius: 5px; font-size: 11.5px; color: var(--text-2); background: transparent; border: 1px solid transparent; cursor: pointer; }
+  .ref-moment-opt:hover { background: var(--bg-3); color: var(--text); }
+  .ref-moment-opt.on { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
   .refadd { margin-top: 6px; padding: 8px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
   .refadd textarea { width: 100%; box-sizing: border-box; resize: vertical; font-size: 12px; }
   .refadd input.field { flex: 1; min-width: 110px; }
