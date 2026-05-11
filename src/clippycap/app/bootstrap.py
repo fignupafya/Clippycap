@@ -14,6 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from clippycap.app.config_service import ConfigService
 from clippycap.app.editing_service import EditingService
 from clippycap.app.jobs import ThreadJobQueue
 from clippycap.app.reference_service import ReferenceService, ReferenceTypeService
@@ -61,6 +62,7 @@ class Application:
     saved_views: SavedViewService
     scans: ScanService
     editing: EditingService
+    config_service: ConfigService
     loaded_plugins: list[str]
     data_dir: Path
     thumbnail_dir: Path
@@ -161,6 +163,9 @@ def build_application(
         database, video_editor, dict(registries.media_types.items()),
         dict(registries.identity_strategies.items()), event_bus, config, thumbnail_dir,
     )
+    config_service = ConfigService(
+        default_toml_path=default_toml_path, data_dir=data_dir, install_dir=install_dir, env=env,
+    )
 
     return Application(
         config=config, database=database, event_bus=event_bus, registries=registries, jobs=jobs,
@@ -168,6 +173,7 @@ def build_application(
         notes=NoteService(database, event_bus), references=ReferenceService(database, event_bus),
         reference_types=ReferenceTypeService(database), sources=SourceService(database, event_bus),
         saved_views=SavedViewService(database), scans=ScanService(database, scanner, jobs, event_bus),
-        editing=editing_service, loaded_plugins=loaded_plugins, data_dir=data_dir, thumbnail_dir=thumbnail_dir,
+        editing=editing_service, config_service=config_service, loaded_plugins=loaded_plugins,
+        data_dir=data_dir, thumbnail_dir=thumbnail_dir,
         tag_images_dir=tag_images_dir, install_dir=install_dir, ffmpeg_available=ffmpeg_path is not None,
     )
