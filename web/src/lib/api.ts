@@ -23,7 +23,19 @@ export interface Tag {
 export interface Source { id: number; path: string; recursive: boolean; enabled: boolean; media_types: string[]; last_scanned_at: string | null; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }
 export interface Health { name: string; ffmpeg: boolean; media_types: string[]; plugins: string[]; }
-export type AppConfig = Record<string, unknown> & { keybindings: Record<string, string>; player: Record<string, number> };
+export interface EditingConfig {
+  reencode: boolean; reencode_crf: number; reencode_preset: string;
+  keep_original_backup: boolean; new_clip_name_template: string; excerpt_reference_type: string;
+}
+export interface PlayerConfig {
+  speeds: number[]; default_speed: number;
+  skip_seconds: number; skip_seconds_fine: number;
+  pause_on_add_note: boolean; prefer_rvfc: boolean;
+}
+export interface AppConfig {
+  editing: EditingConfig; player: PlayerConfig; keybindings: Record<string, string>;
+  [key: string]: unknown;
+}
 type EditedAsset = { id: number; title: string };
 
 interface AssetQuery {
@@ -59,6 +71,8 @@ function qs(params: Record<string, unknown>): string {
 
 export const api = {
   getConfig: () => req<AppConfig>('GET', '/api/config'),
+  updateConfig: (patch: { editing?: EditingConfig; player?: PlayerConfig; keybindings?: Record<string, string> }) =>
+    req<AppConfig>('PUT', '/api/config', patch),
   getHealth: () => req<Health>('GET', '/api/health'),
   listAssets: (q: AssetQuery = {}) => req<AssetPage>('GET', `/api/assets${qs(q as Record<string, unknown>)}`),
   getAsset: (id: number) => req<AssetDetail>('GET', `/api/assets/${id}`),

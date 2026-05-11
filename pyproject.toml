@@ -12,6 +12,7 @@ dependencies = [
     "pydantic-settings>=2.3",
     "blake3>=0.4",
     "pywebview>=5.1",
+    "tomli_w>=1.0",         # writes <data_dir>/local.toml when the user edits settings in the UI
     # NOTE: ffmpeg/ffprobe are NOT Python packages — they are native binaries bundled
     # at packaging time (see packaging/). The "no-ffmpeg" fallback needs no extra deps.
 ]

@@ -25,6 +25,7 @@ from clippycap.app.services import AssetDetail, AssetSummary, NoteView
 from clippycap.core.entities import Asset, ReferenceType, Source, Tag
 from clippycap.core.errors import ClippycapError, ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.query import AssetFilter
+from clippycap.infra.config.schema import EditingConfig, PlayerConfig
 
 _THUMBNAIL_FORMAT_EXT = {"webp": ".webp", "jpg": ".jpg", "jpeg": ".jpg", "png": ".png"}  # config -> ext
 _THUMBNAIL_EXTS = (".webp", ".jpg", ".png")  # tried in order when serving an existing thumbnail
@@ -131,6 +132,13 @@ class TitleBody(BaseModel):
 
 class RenameFileBody(BaseModel):
     name: str = Field(min_length=1)
+
+
+class ConfigPatchBody(BaseModel):
+    """A partial settings update. Each present section is fully validated against its schema."""
+    editing: EditingConfig | None = None
+    player: PlayerConfig | None = None
+    keybindings: dict[str, str] | None = None
 
 
 class GeneralNoteBody(BaseModel):
@@ -620,6 +628,20 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     @api.get("/api/config")
     def get_config(app: AppDep) -> dict[str, Any]:
         return app.config.model_dump(mode="json")
+
+    @api.put("/api/config")
+    def update_config(app: AppDep, body: ConfigPatchBody) -> dict[str, Any]:
+        # Pydantic has already validated each section against its EditingConfig / PlayerConfig
+        # schema; ConfigService writes local.toml + reloads (and rolls back local.toml on a failing
+        # cross-section validation). We then swap app.config for the new one so GET /api/config and
+        # the frontend pick it up.
+        new_config = app.config_service.update(
+            editing=body.editing.model_dump(mode="python") if body.editing else None,
+            player=body.player.model_dump(mode="python") if body.player else None,
+            keybindings=body.keybindings,
+        )
+        app.config = new_config
+        return new_config.model_dump(mode="json")
 
     @api.get("/api/plugins")
     def list_plugins(app: AppDep) -> list[str]:

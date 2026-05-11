@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, Note, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, Source, Tag } from './lib/api';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
@@ -29,6 +29,14 @@
   let scanJob = $state<{ scanned: number } | null>(null);
   let showTags = $state(false);
   let showKeys = $state(false);
+  let showSettings = $state(false);
+  let settingsTab = $state<'editing' | 'player' | 'keys'>('editing');
+  let pendingEditing = $state<EditingConfig | null>(null);
+  let pendingPlayer = $state<PlayerConfig | null>(null);
+  let pendingKeybindings = $state<Record<string, string> | null>(null);
+  let capturingAction = $state<string | null>(null);
+  let savingSettings = $state(false);
+  let settingsError = $state<string | null>(null);
   let newTagName = $state('');
   let newTagColor = $state('#56c271');
   let tagIcon = $state('');
@@ -382,6 +390,28 @@
     } catch (e) { window.alert(String(e)); } finally { videoVersion += 1; busy = false; }
   }
 
+  function openSettings() {
+    if (!cfg) return;
+    pendingEditing = { ...cfg.editing };
+    pendingPlayer = { ...cfg.player };
+    pendingKeybindings = { ...cfg.keybindings };
+    capturingAction = null; settingsError = null; settingsTab = 'editing';
+    showSettings = true;
+  }
+  function closeSettings() {
+    showSettings = false; capturingAction = null;
+    pendingEditing = null; pendingPlayer = null; pendingKeybindings = null; settingsError = null;
+  }
+  function startCapture(action: string) { capturingAction = capturingAction === action ? null : action; }
+  async function saveSettings() {
+    if (!pendingEditing || !pendingPlayer || !pendingKeybindings || savingSettings) return;
+    savingSettings = true; settingsError = null;
+    try {
+      cfg = await api.updateConfig({ editing: pendingEditing, player: pendingPlayer, keybindings: pendingKeybindings });
+      closeSettings();
+    } catch (e) { settingsError = String(e); }
+    finally { savingSettings = false; }
+  }
   function inEditable(el: EventTarget | null): boolean {
     const t = el as HTMLElement | null;
     return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
@@ -394,7 +424,20 @@
     return [...mods, e.key === ' ' ? 'space' : e.key].join('+').toLowerCase();
   }
   function onKey(e: KeyboardEvent) {
+    // (1) keybinding capture eats the next non-modifier press (Esc cancels)
+    if (capturingAction !== null) {
+      e.preventDefault(); e.stopPropagation();
+      if (e.key === 'Escape') { capturingAction = null; return; }
+      if (e.key === 'Control' || e.key === 'Shift' || e.key === 'Alt' || e.key === 'Meta') return;
+      if (pendingKeybindings) pendingKeybindings[capturingAction] = keyName(e);
+      capturingAction = null;
+      return;
+    }
+    // (2) Esc always closes the Settings modal, even from a focused input
+    if (showSettings && e.key === 'Escape') { closeSettings(); return; }
     if (inEditable(e.target)) return;
+    // (3) while Settings is open, don't fire app shortcuts behind it
+    if (showSettings) return;
     if (!detail) {                                          // grid view
       if (e.key === 'Escape' && selected.size > 0) clearSelection();
       else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a' && assets.length > 0) { e.preventDefault(); selectAllVisible(); }
@@ -435,6 +478,7 @@
     </select>
     <button class="btn sm" onclick={scanAll}>{scanJob ? `Scanning… ${scanJob.scanned}` : 'Scan'}</button>
     <button class="btn sm" onclick={() => (showTags = true)}>Tags</button>
+    <button class="btn sm" onclick={openSettings} disabled={!cfg} title="Settings">⚙ Settings</button>
   </header>
 
   <div class="body">
@@ -655,6 +699,63 @@
 {/if}
 
 {#snippet tagFace(t: Tag)}{#if t.image_ref}<img class="tagimg" src="/api/tag-images/{t.image_ref}" alt="" />{:else if t.icon}{t.icon}{/if}{/snippet}
+{#if showSettings && cfg}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) closeSettings(); }}>
+    <div class="modal settings">
+      <div class="mtop"><h3>Settings</h3><span style:flex="1"></span><button class="btn sm" onclick={closeSettings}>Close</button></div>
+      <div class="settings-tabs">
+        <button class:on={settingsTab === 'editing'} onclick={() => (settingsTab = 'editing')}>Editing</button>
+        <button class:on={settingsTab === 'player'} onclick={() => (settingsTab = 'player')}>Player</button>
+        <button class:on={settingsTab === 'keys'} onclick={() => (settingsTab = 'keys')}>Keyboard</button>
+      </div>
+      <div class="mbody">
+        {#if settingsTab === 'editing' && pendingEditing}
+          <label class="srow"><span class="slabel">Re-encode on trim / cut <span class="faint" style:font-size="11px">(frame-accurate; slower)</span></span>
+            <input type="checkbox" bind:checked={pendingEditing.reencode} /></label>
+          <label class="srow"><span class="slabel">Re-encode CRF <span class="faint" style:font-size="11px">(0 best — 51 worst)</span></span>
+            <input type="number" min="0" max="51" bind:value={pendingEditing.reencode_crf} /></label>
+          <label class="srow"><span class="slabel">Re-encode preset</span>
+            <select bind:value={pendingEditing.reencode_preset}>
+              {#each ['ultrafast','superfast','veryfast','faster','fast','medium','slow','slower','veryslow'] as p}<option value={p}>{p}</option>{/each}
+            </select></label>
+          <label class="srow"><span class="slabel">Keep a backup of the pre-edit file</span>
+            <input type="checkbox" bind:checked={pendingEditing.keep_original_backup} /></label>
+          <label class="srow"><span class="slabel">New-clip name template <span class="faint" style:font-size="11px">{`{stem} {start} {end} {ext}`}</span></span>
+            <input class="field" type="text" bind:value={pendingEditing.new_clip_name_template} /></label>
+          <label class="srow"><span class="slabel">Excerpt reference type</span>
+            <input class="field" type="text" bind:value={pendingEditing.excerpt_reference_type} /></label>
+          <p class="faint" style:font-size="12px" style:margin-top="10px">Editing settings take effect after the app is restarted.</p>
+        {:else if settingsTab === 'player' && pendingPlayer}
+          <label class="srow"><span class="slabel">Skip seconds <span class="faint" style:font-size="11px">(skip back / forward buttons)</span></span>
+            <input type="number" step="0.5" min="0.1" bind:value={pendingPlayer.skip_seconds} /></label>
+          <label class="srow"><span class="slabel">Skip seconds — fine <span class="faint" style:font-size="11px">(Shift + arrow)</span></span>
+            <input type="number" step="0.5" min="0.1" bind:value={pendingPlayer.skip_seconds_fine} /></label>
+          <label class="srow"><span class="slabel">Pause when adding a note</span>
+            <input type="checkbox" bind:checked={pendingPlayer.pause_on_add_note} /></label>
+          <p class="faint" style:font-size="12px" style:margin-top="10px">Player settings apply right away.</p>
+        {:else if settingsTab === 'keys' && pendingKeybindings}
+          <p class="faint" style:font-size="12px" style:margin-bottom="8px">Click a binding and press the new key combination. Esc cancels the capture.</p>
+          {#each SHORTCUT_ROWS as [action, label] (action)}
+            <div class="srow kbrow">
+              <span class="slabel">{label}</span>
+              <button class="kbd-edit" class:capturing={capturingAction === action} onclick={() => startCapture(action)}>
+                {capturingAction === action ? 'press a key…' : (pendingKeybindings[action] || '—')}
+              </button>
+            </div>
+          {/each}
+        {/if}
+        {#if settingsError}<div class="err" style:margin-top="10px">{settingsError}</div>{/if}
+      </div>
+      <div class="mfoot">
+        <span style:flex="1"></span>
+        <button class="btn sm" onclick={closeSettings}>Cancel</button>
+        <button class="btn sm primary" onclick={saveSettings} disabled={savingSettings}>{savingSettings ? 'Saving…' : 'Save'}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if showTags}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) { showTags = false; cancelEditTag(); } }}>
@@ -784,4 +885,18 @@
   .keys { border-collapse: collapse; width: 100%; }
   .keys td { padding: 3px 12px 3px 0; font-size: 12.5px; vertical-align: top; }
   kbd { font-family: ui-monospace, monospace; font-size: 11px; background: var(--bg-3); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
+  .modal.settings { width: min(640px, 100%); }
+  .settings-tabs { display: flex; gap: 4px; padding: 0 14px; border-bottom: 1px solid var(--border); background: var(--bg-1); }
+  .settings-tabs button { padding: 8px 12px; background: transparent; border: none; color: var(--text-2); border-bottom: 2px solid transparent; cursor: pointer; font-size: 12.5px; font-weight: 600; margin-bottom: -1px; }
+  .settings-tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+  .settings-tabs button:hover { color: var(--text); }
+  .srow { display: flex; align-items: center; gap: 12px; padding: 6px 0; font-size: 13px; }
+  .srow .slabel { flex: 1; color: var(--text-2); }
+  .srow input[type="number"] { width: 84px; padding: 3px 6px; background: var(--bg-2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }
+  .srow input[type="text"], .srow input.field { flex: 0 1 260px; }
+  .srow select { padding: 3px 6px; background: var(--bg-2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }
+  .kbd-edit { font-family: ui-monospace, monospace; font-size: 11.5px; background: var(--bg-3); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 9px; min-width: 116px; text-align: center; cursor: pointer; }
+  .kbd-edit:hover { border-color: var(--accent); }
+  .kbd-edit.capturing { background: var(--accent); color: #1a0e07; border-color: var(--accent); }
+  .mfoot { display: flex; align-items: center; padding: 10px 16px; border-top: 1px solid var(--border); gap: 8px; background: var(--bg-1); }
 </style>
