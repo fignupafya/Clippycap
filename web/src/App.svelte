@@ -400,27 +400,6 @@
     const end = n.end_timestamp_ms != null ? start + Math.max(1, n.end_timestamp_ms - (n.timestamp_ms ?? 0)) : undefined;
     try { await api.retimeNote(n.id, start, end); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
-  function parseTimeRange(s: string): { start: number; end: number | null } | null {
-    const one = (x: string): number | null => {
-      const segs = x.trim().split(':');
-      if (segs.length < 1 || segs.length > 3) return null;
-      let total = 0;
-      for (const seg of segs) { const v = Number(seg.trim()); if (!isFinite(v) || v < 0) return null; total = total * 60 + v; }
-      return Math.round(total * 1000);
-    };
-    const part = s.trim().split(/\s*[-–—]\s*/);
-    if (part.length === 1) { const t = one(part[0]); return t === null ? null : { start: t, end: null }; }
-    if (part.length === 2) { const a = one(part[0]), b = one(part[1]); return a === null || b === null || b <= a ? null : { start: a, end: b }; }
-    return null;
-  }
-  async function editNoteTime(n: Note) {
-    const cur = n.end_timestamp_ms != null ? `${fmt(n.timestamp_ms ?? 0)}-${fmt(n.end_timestamp_ms)}` : fmt(n.timestamp_ms ?? 0);
-    const input = await promptDialog('Set the note time', { value: cur, detail: 'e.g. "1:23", "83.5" (seconds), or "1:23-1:30" for an interval', okLabel: 'Set time' });
-    if (input == null) return;
-    const parsed = parseTimeRange(input);
-    if (parsed === null) { toast("Couldn't understand that time.", 'error'); return; }
-    try { await api.retimeNote(n.id, parsed.start, parsed.end ?? undefined); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
-  }
   async function addTagToNote(n: Note, tagId: number) {
     if (!detail) return;
     // convenience: tagging a moment also tags the clip (the user can still untag the clip below)
@@ -855,7 +834,6 @@
               <span class="body">{@render noteBody(n.body)}</span>
               <button class="x" onclick={() => startEditNoteBody(n)} title="edit the text — type @ to link a clip">📝</button>
               <button class="x" onclick={() => retimeNote(n)} title="move to the current playhead ({fmt(curMs)})">↻</button>
-              <button class="x" onclick={() => editNoteTime(n)} title="type a new time">✏</button>
               <button class="x" onclick={() => deleteNote(n.id)} title="delete">🗑</button>
             {/if}
           </div>
