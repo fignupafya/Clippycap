@@ -36,6 +36,8 @@
   let tagImageRef = $state<string | null>(null);
   let uploadingImg = $state(false);
   let videoEl = $state<HTMLVideoElement>();
+  let timelineEl = $state<HTMLDivElement>();
+  let dragging = $state<'in' | 'out' | 'play' | null>(null);
   let playbackRate = $state(1);
   let generalNoteText = $state('');
 
@@ -54,9 +56,13 @@
     const v = meta?.[key];
     return typeof v === 'number' ? v : fallback;
   }
-  let selValid = $derived(selIn !== null && selOut !== null && selOut > selIn);
   let fps = $derived(getNum(detail?.metadata, 'fps', 30) || 30);
   let timelineMs = $derived(getNum(detail?.metadata, 'duration_ms', 0) || durMs || 0);
+  // an IN-only selection means "[selIn, end]", an OUT-only selection means "[0, selOut]" -- so the
+  // user can trim just the head or just the tail without having to set both ends explicitly.
+  let effIn = $derived(selIn ?? 0);
+  let effOut = $derived(selOut ?? timelineMs);
+  let selValid = $derived(timelineMs > 0 && (selIn !== null || selOut !== null) && effOut > effIn);
 
   const FALLBACK_KEYS: Record<string, string> = {
     play_pause: 'space', toggle_play_k: 'k', skip_back: 'arrowleft', skip_fwd: 'arrowright',
@@ -253,8 +259,8 @@
   }
   function addNoteAtNow() { void addNote(frameNowMs()); }
   function addIntervalNote() {
-    if (!selValid) { window.alert(`Set a selection first: press "${binding('sel_in')}" (in) then "${binding('sel_out')}" (out).`); return; }
-    void addNote(selIn as number, selOut as number);
+    if (!selValid) { window.alert(`Set a selection first: press "${binding('sel_in')}" (in) and/or "${binding('sel_out')}" (out) -- one is enough; the rest is taken from start/end.`); return; }
+    void addNote(effIn, effOut);
   }
   async function deleteNote(id: number) {
     try { await api.deleteNote(id); await refreshDetail(); } catch (e) { window.alert(String(e)); }
@@ -296,14 +302,39 @@
   function setOut() { selOut = frameNowMs(); if (selIn !== null && selIn >= selOut) selIn = null; }
   function clearSel() { selIn = null; selOut = null; }
   function pct(ms: number): number { return timelineMs ? Math.max(0, Math.min(100, (ms / timelineMs) * 100)) : 0; }
-  function timelineClick(e: MouseEvent) {
-    if (!timelineMs) return;
-    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    seek(((e.clientX - r.left) / r.width) * timelineMs);
+  function pointerToMs(e: PointerEvent | MouseEvent): number {
+    if (!timelineEl || !timelineMs) return 0;
+    const r = timelineEl.getBoundingClientRect();
+    const x = Math.max(0, Math.min(r.width, e.clientX - r.left));
+    return r.width > 0 ? (x / r.width) * timelineMs : 0;
   }
+  function startDrag(kind: 'in' | 'out', e: PointerEvent) {
+    if (e.button !== 0) return;
+    e.stopPropagation(); e.preventDefault();
+    dragging = kind;
+  }
+  function timelinePointerDown(e: PointerEvent) {
+    if (e.button !== 0 || !timelineMs) return;
+    seek(pointerToMs(e));
+    dragging = 'play';                                           // keep scrubbing while the button is held
+  }
+  function onPointerMove(e: PointerEvent) {
+    if (!dragging || !timelineMs) return;
+    const ms = Math.round(pointerToMs(e));
+    if (dragging === 'in') {
+      const hi = selOut ?? timelineMs;
+      selIn = Math.max(0, Math.min(ms, Math.max(0, hi - 1)));    // never cross the OUT handle
+    } else if (dragging === 'out') {
+      const lo = selIn ?? 0;
+      selOut = Math.min(timelineMs, Math.max(ms, lo + 1));       // never cross the IN handle
+    } else {
+      seek(ms);
+    }
+  }
+  function endDrag() { dragging = null; }
   async function doEdit(kind: EditKind) {
     if (!detail || !selValid || busy) return;
-    const id = detail.id, s = selIn as number, o = selOut as number;
+    const id = detail.id, s = Math.round(effIn), o = Math.round(effOut);
     const span = `${fmt(s)} – ${fmt(o)}`;
     if (kind === 'trim' && !window.confirm(`Permanently shorten this clip to keep only ${span}? There is no undo.`)) return;
     if (kind === 'remove' && !window.confirm(`Permanently cut ${span} out of this clip? There is no undo.`)) return;
@@ -359,7 +390,7 @@
   function hideBrokenImg(e: Event) { (e.currentTarget as HTMLImageElement).style.display = 'none'; }
 </script>
 
-<svelte:window onkeydown={onKey} />
+<svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} />
 
 <div class="app">
   <header>
@@ -458,8 +489,8 @@
                ontimeupdate={() => { if (videoEl) curMs = Math.floor(videoEl.currentTime * 1000); }}
                onloadedmetadata={() => { if (videoEl && Number.isFinite(videoEl.duration)) durMs = Math.floor(videoEl.duration * 1000); }}></video>
         <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-        <div class="timeline" onclick={timelineClick} title="Click to seek">
-          {#if selValid}<div class="sel" style:left={pct(selIn ?? 0) + '%'} style:width={(pct(selOut ?? 0) - pct(selIn ?? 0)) + '%'}></div>{/if}
+        <div class="timeline" bind:this={timelineEl} class:dragging onpointerdown={timelinePointerDown} title="Click or drag to seek; drag the IN / OUT handles to adjust">
+          {#if selValid}<div class="sel" style:left={pct(effIn) + '%'} style:width={Math.max(0, pct(effOut) - pct(effIn)) + '%'}></div>{/if}
           {#each d.timestamped_notes as n (n.id)}
             {#if n.end_timestamp_ms != null}
               <div class="nbar" style:left={pct(n.timestamp_ms ?? 0) + '%'} style:width={Math.max(0.7, pct(n.end_timestamp_ms) - pct(n.timestamp_ms ?? 0)) + '%'} title={n.body}></div>
@@ -468,6 +499,14 @@
             {/if}
           {/each}
           <div class="playhead" style:left={pct(curMs) + '%'}></div>
+          {#if selIn !== null}
+            <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+            <div class="handle in" style:left={pct(selIn) + '%'} onpointerdown={(e) => startDrag('in', e)} title="drag to adjust IN ({fmt(selIn)})"></div>
+          {/if}
+          {#if selOut !== null}
+            <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+            <div class="handle out" style:left={pct(selOut) + '%'} onpointerdown={(e) => startDrag('out', e)} title="drag to adjust OUT ({fmt(selOut)})"></div>
+          {/if}
         </div>
         <div class="pctrl">
           <button class="btn sm" onclick={() => nudge(-skipSeconds(false))} title="back {skipSeconds(false)}s ({binding('skip_back')})">« {skipSeconds(false)}s</button>
@@ -489,7 +528,7 @@
           <button class="btn sm" onclick={setIn} title="set selection IN here ({binding('sel_in')})">⟦ in @ {fmt(curMs)}</button>
           <button class="btn sm" onclick={setOut} title="set selection OUT here ({binding('sel_out')})">out @ {fmt(curMs)} ⟧</button>
           {#if selIn !== null || selOut !== null}
-            <span class="seltext">selection {selIn !== null ? fmt(selIn) : '—'} – {selOut !== null ? fmt(selOut) : '—'}{selValid ? ` (${fmt((selOut as number) - (selIn as number))})` : ''}</span>
+            <span class="seltext">selection {fmt(effIn)}{selIn === null ? ' (start)' : ''} – {fmt(effOut)}{selOut === null ? ' (end)' : ''}{selValid ? ` · ${fmt(effOut - effIn)}` : ''}</span>
             <button class="btn sm" onclick={clearSel}>clear</button>
           {/if}
           {#if selValid}
@@ -672,6 +711,11 @@
   .timeline .nbar { position: absolute; top: 3px; bottom: 3px; background: rgba(240,179,79,.55); border-radius: 2px; }
   .timeline .ntick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--amber); }
   .timeline .playhead { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 5px rgba(255,255,255,.7); pointer-events: none; }
+  .timeline { touch-action: none; }
+  .timeline .handle { position: absolute; top: 0; bottom: 0; width: 10px; margin-left: -5px; background: var(--accent); border-radius: 3px; cursor: ew-resize; z-index: 2; box-shadow: 0 0 0 1px rgba(0,0,0,.45); display: grid; place-items: center; touch-action: none; }
+  .timeline .handle::after { content: ''; width: 2px; height: 60%; background: rgba(0,0,0,.55); border-radius: 1px; }
+  .timeline .handle:hover { background: #ffb482; }
+  .timeline.dragging { cursor: ew-resize; }
   .trim { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
   .trim .seltext { font-family: ui-monospace, monospace; font-size: 11.5px; font-weight: 700; color: var(--amber); }
   .pctrl .time { font-family: ui-monospace, monospace; font-size: 11.5px; color: var(--text-2); }
