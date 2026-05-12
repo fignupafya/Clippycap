@@ -206,7 +206,20 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _redirect_headless_output() -> None:
+    """A windowed (no-console) build has no stdout/stderr -- send them to a log file instead."""
+    base = os.environ.get("APPDATA") or tempfile.gettempdir()
+    log_path = Path(base) / "Clippycap" / "logs" / "clippycap.log"
+    with contextlib.suppress(OSError):
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = log_path.open("a", encoding="utf-8", buffering=1)
+        sys.stdout = handle
+        sys.stderr = handle
+
+
 def main(argv: list[str] | None = None) -> int:
+    if sys.stdout is None or sys.stderr is None:        # PyInstaller --windowed build
+        _redirect_headless_output()
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     args = _build_parser().parse_args(argv)
     handlers: dict[str | None, object] = {
