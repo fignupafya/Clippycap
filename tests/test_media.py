@@ -8,9 +8,9 @@ from pathlib import Path
 import pytest
 
 from clippycap.infra.config import Config, load_config
-from clippycap.infra.media.ffmpeg import resolve_ffmpeg_tools
-from clippycap.infra.media.video_metadata import NoOpMetadataExtractor, parse_ffprobe
-from clippycap.infra.media.video_thumbnail import UnavailableThumbnailer
+from clippycap.infra.media.ffmpeg import FfmpegTools, FfmpegToolsHolder, resolve_ffmpeg_tools
+from clippycap.infra.media.video_metadata import FfprobeMetadataExtractor, parse_ffprobe
+from clippycap.infra.media.video_thumbnail import FfmpegThumbnailer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TOML = REPO_ROOT / "config" / "default.toml"
@@ -25,7 +25,7 @@ def _cfg(tmp_path: Path, **env: str) -> Config:
 
 def test_resolve_returns_none_when_disabled(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path, CLIPPYCAP__MEDIA__FFMPEG__ENABLED="false")
-    assert resolve_ffmpeg_tools(cfg, tmp_path / "install") == (None, None)
+    assert resolve_ffmpeg_tools(cfg, tmp_path / "install") == FfmpegTools(None, None)
 
 
 def test_resolve_missing_absolute_path_is_none(tmp_path: Path) -> None:
@@ -34,15 +34,16 @@ def test_resolve_missing_absolute_path_is_none(tmp_path: Path) -> None:
         CLIPPYCAP__MEDIA__FFMPEG__FFMPEG_PATH=str(tmp_path / "nope" / "ffmpeg"),
         CLIPPYCAP__MEDIA__FFMPEG__FFPROBE_PATH=str(tmp_path / "nope" / "ffprobe"),
     )
-    assert resolve_ffmpeg_tools(cfg, tmp_path / "install") == (None, None)
+    tools = resolve_ffmpeg_tools(cfg, tmp_path / "install")
+    assert tools.ffmpeg_path is None and tools.ffprobe_path is None
 
 
 @pytest.mark.skipif(
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None, reason="ffmpeg not installed"
 )
 def test_resolve_auto_finds_path_install(tmp_path: Path) -> None:
-    ffmpeg, ffprobe = resolve_ffmpeg_tools(_cfg(tmp_path), tmp_path / "install")
-    assert ffmpeg is not None and ffprobe is not None
+    tools = resolve_ffmpeg_tools(_cfg(tmp_path), tmp_path / "install")
+    assert tools.ffmpeg_available and tools.ffprobe_available
 
 
 def test_parse_ffprobe_extracts_fields() -> None:
@@ -66,8 +67,9 @@ def test_parse_ffprobe_handles_missing_bits() -> None:
     assert parse_ffprobe({"streams": [{"codec_type": "video"}]}) == {}
 
 
-def test_no_op_extractor_and_unavailable_thumbnailer(tmp_path: Path) -> None:
-    assert NoOpMetadataExtractor().extract(tmp_path / "x.mp4") == {}
-    thumb = UnavailableThumbnailer()
+def test_media_adapters_are_no_ops_without_ffmpeg(tmp_path: Path) -> None:
+    holder = FfmpegToolsHolder(FfmpegTools(None, None))
+    assert FfprobeMetadataExtractor(holder).extract(tmp_path / "x.mp4") == {}
+    thumb = FfmpegThumbnailer(holder, width=480, at_fraction=0.25, output_format="webp")
     assert thumb.available is False
     assert thumb.make(tmp_path / "x.mp4", tmp_path / "x.webp", metadata={}) is False

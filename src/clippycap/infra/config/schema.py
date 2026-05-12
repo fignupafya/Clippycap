@@ -85,10 +85,13 @@ class ThumbnailsConfig(_Section):
 
 class FfmpegConfig(_Section):
     enabled: bool
-    # "auto" -> probe (bundled, PATH, common install dirs); "@bundled" -> only the bundled
-    # binary; otherwise an absolute path. Resolved by infra/media at runtime.
+    # "auto" -> probe (<data_dir>/bin, the bundle, common install dirs, PATH); "@bundled" -> only the
+    # bundled binary; otherwise an absolute path to ffmpeg.exe / ffprobe.exe. Resolved by infra/media.
     ffmpeg_path: str = Field(min_length=1)
     ffprobe_path: str = Field(min_length=1)
+    # When ffmpeg isn't found on startup, prompt the user (once) to download a static build. Flips to
+    # false when they decline; the app's Settings > FFmpeg page can still install it later. Windows only.
+    offer_install_if_missing: bool
 
 
 class VideoMediaConfig(_Section):

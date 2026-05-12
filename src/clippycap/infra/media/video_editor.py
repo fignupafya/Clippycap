@@ -2,9 +2,11 @@
 
 :class:`FfmpegVideoEditor` keeps or removes a time range of a file. By default it stream-copies
 (``-c copy``) -- instant and lossless, but the cut snaps to a keyframe; with ``reencode=True`` it
-re-encodes for frame-accurate cuts (slower, a small quality cost). :class:`UnavailableVideoEditor`
-(``available is False``) is used when no ffmpeg binary is configured; its methods just return
-``False`` -- the application layer must check ``available`` before offering the operation.
+re-encodes for frame-accurate cuts (slower, a small quality cost). It reads the ffmpeg path from a
+shared :class:`FfmpegToolsHolder` and the ``[editing]`` settings from a :class:`ConfigHolder`, so
+both an ffmpeg install and a settings change take effect on the very next call -- no restart.
+``available`` is ``False`` while no ffmpeg binary is located; the application layer must check it
+before offering an edit (each method also returns ``False`` defensively if it isn't).
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 from clippycap.infra.config import ConfigHolder
+from clippycap.infra.media.ffmpeg import FfmpegToolsHolder
 
 _log = logging.getLogger(__name__)
 _EDIT_TIMEOUT = 600  # seconds -- re-encoding a long clip can take a while
@@ -23,11 +26,13 @@ _TRIM_START_BELOW = 0.05  # "remove" with a head shorter than this is treated as
 
 
 class FfmpegVideoEditor:
-    available = True
-
-    def __init__(self, ffmpeg_path: Path, *, config_holder: ConfigHolder) -> None:
-        self._ffmpeg = ffmpeg_path
+    def __init__(self, *, tools: FfmpegToolsHolder, config_holder: ConfigHolder) -> None:
+        self._tools = tools
         self._config_holder = config_holder        # read [editing] live, so PUT /api/config takes effect at once
+
+    @property
+    def available(self) -> bool:
+        return self._tools.current.ffmpeg_path is not None
 
     _MP4_LIKE = (".mp4", ".m4v", ".mov", ".m4a")
 
@@ -53,9 +58,12 @@ class FfmpegVideoEditor:
         return flags
 
     def _run(self, args: list[str]) -> bool:
+        ffmpeg = self._tools.current.ffmpeg_path
+        if ffmpeg is None:
+            return False
         try:
             done = subprocess.run(
-                [str(self._ffmpeg), "-y", "-loglevel", "error", *args],
+                [str(ffmpeg), "-y", "-loglevel", "error", *args],
                 capture_output=True, timeout=_EDIT_TIMEOUT, check=False,
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -109,12 +117,15 @@ class FfmpegVideoEditor:
     def resolve_cut_start(self, source: Path, requested_ms: int) -> int:
         # Ask ffmpeg what the *first frame* its seek to requested_ms lands on is (re-encode: the first
         # frame >= requested_ms; stream copy: the keyframe <= requested_ms) -- showinfo prints its pts.
+        ffmpeg = self._tools.current.ffmpeg_path
+        if ffmpeg is None:
+            return requested_ms
         req_s = max(0.0, requested_ms / 1000.0)
         args = ["-ss", f"{req_s:.3f}",
                 *([] if self._config_holder.current.editing.reencode else ["-noaccurate_seek"]),
                 "-i", str(source), "-vf", "showinfo", "-frames:v", "1", "-f", "null", "-"]
         try:
-            done = subprocess.run([str(self._ffmpeg), "-hide_banner", "-loglevel", "info", *args],
+            done = subprocess.run([str(ffmpeg), "-hide_banner", "-loglevel", "info", *args],
                                   capture_output=True, timeout=60, check=False)
         except (OSError, subprocess.SubprocessError):
             return requested_ms
@@ -125,19 +136,3 @@ class FfmpegVideoEditor:
             return round(float(match.group(1)) * 1000.0)
         except ValueError:
             return requested_ms
-
-
-class UnavailableVideoEditor:
-    available = False
-
-    def keep_range(self, source: Path, out_path: Path, *, start_ms: int, end_ms: int) -> bool:
-        _ = (source, out_path, start_ms, end_ms)
-        return False
-
-    def remove_range(self, source: Path, out_path: Path, *, start_ms: int, end_ms: int) -> bool:
-        _ = (source, out_path, start_ms, end_ms)
-        return False
-
-    def resolve_cut_start(self, source: Path, requested_ms: int) -> int:
-        _ = source
-        return requested_ms

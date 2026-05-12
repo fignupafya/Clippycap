@@ -117,3 +117,20 @@ def test_thumbnail_unavailable_then_client_upload(tmp_path: Path) -> None:
     assert client.put("/thumbnails/9999", content=b"x", headers={"content-type": "image/jpeg"}).status_code == 404
     assert client.put(f"/thumbnails/{asset_id}", content=b"", headers={"content-type": "image/jpeg"}).status_code == 400
     assert client.get("/api/health").json()["ffmpeg"] is False
+
+
+def test_ffmpeg_status_and_settings(tmp_path: Path) -> None:
+    client = _build(tmp_path)                               # ffmpeg disabled in the test build
+    status = client.get("/api/ffmpeg").json()
+    assert status["available"] is False and status["enabled"] is False
+    assert status["offer_install"] is False                 # never offer when ffmpeg is disabled in config
+    assert {"ffmpeg_path", "ffprobe_path", "version", "configured_path", "can_install", "installing"} <= status.keys()
+
+    # pointing at a path that has no working ffmpeg is a 400, and changes nothing
+    bad = client.post("/api/ffmpeg/path", json={"path": str(tmp_path / "no" / "such" / "ffmpeg.exe")})
+    assert bad.status_code == 400
+    assert client.get("/api/ffmpeg").json()["configured_path"] is None
+
+    assert client.post("/api/ffmpeg/dismiss-prompt").status_code == 204
+    reset = client.post("/api/ffmpeg/auto")
+    assert reset.status_code == 200 and reset.json()["configured_path"] is None

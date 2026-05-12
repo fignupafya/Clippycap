@@ -1,26 +1,27 @@
 # -*- mode: python ; coding: utf-8 -*-
-# PyInstaller spec for Clippycap. Build with:  pyinstaller --noconfirm packaging/clippycap.spec
-# (run packaging/build.ps1 to also build the frontend first). Output: dist/Clippycap/Clippycap.exe.
+# PyInstaller spec for Clippycap. From one analysis it builds BOTH:
+#   dist/Clippycap-Portable.exe   -- a single self-contained .exe (one-file; unpacks to a temp dir on
+#                                    each launch). Nothing to install: download it and double-click.
+#   dist/Clippycap/               -- a one-folder build (Clippycap.exe + _internal/). Faster startup;
+#                                    this is what packaging/installer.iss wraps into Clippycap-Setup.exe.
 #
-# Prerequisites the build picks up if present:
-#   web/dist/   -- the built Svelte SPA  (run `npm --prefix web run build`)
-#   bin/        -- ffmpeg.exe + ffprobe.exe (+ their DLLs)  (run packaging/get_ffmpeg.ps1)
-# Either may be absent: without web/dist the backend serves a placeholder page; without bin/ the
-# app uses its no-ffmpeg fallback (client-side thumbnails, no trimming).
+# Build:  pyinstaller --noconfirm packaging/clippycap.spec   (packaging/build.ps1 builds the web UI
+# first, then runs this, then -- if Inno Setup is installed -- compiles the installer).
 #
-# To build a single .exe instead of a folder: replace the EXE(...) call with the all-in-one form
-# (`EXE(pyz, a.scripts, a.binaries, a.datas, [], name="Clippycap", ...)`) and delete the COLLECT(...)
-# line. (Slower startup -- it unpacks to a temp dir on every launch.)
+# Bundled data: config/default.toml (always) and web/dist/ (the built Svelte SPA, if present -- without
+# it the backend serves a placeholder page).  ffmpeg is NOT bundled: it's large (~150 MB) and licence-
+# encumbered, so the app downloads a static build on demand (Settings > FFmpeg / the first-run prompt),
+# or the installer offers to. It always lands in %APPDATA%\Clippycap\bin\.
+#
+# A custom icon: drop a packaging/clippycap.ico here (it is picked up automatically below).
 
 from pathlib import Path
 
-ROOT = Path(SPECPATH).parent          # SPECPATH = the dir holding this .spec (i.e. packaging/)
+ROOT = Path(SPECPATH).parent          # SPECPATH = the dir holding this .spec (packaging/)
 
 datas = [(str(ROOT / "config" / "default.toml"), "config")]
 if (ROOT / "web" / "dist").is_dir():
     datas.append((str(ROOT / "web" / "dist"), "web/dist"))
-if (ROOT / "bin").is_dir():
-    datas.append((str(ROOT / "bin"), "bin"))
 
 hiddenimports = [
     # uvicorn loads its loop / protocol implementations dynamically -- PyInstaller can't see those.
@@ -30,25 +31,28 @@ hiddenimports = [
     "uvicorn.lifespan", "uvicorn.lifespan.on",
 ]
 
+_icon = ROOT / "packaging" / "clippycap.ico"
+icon = str(_icon) if _icon.is_file() else None
+
 a = Analysis(
     [str(ROOT / "packaging" / "clippycap_entry.py")],
     pathex=[str(ROOT / "src")],
-    binaries=[],
-    datas=datas,
-    hiddenimports=hiddenimports,
-    hookspath=[],
-    excludes=["tkinter"],
-    noarchive=False,
+    binaries=[], datas=datas, hiddenimports=hiddenimports,
+    hookspath=[], excludes=["tkinter"], noarchive=False,
 )
 pyz = PYZ(a.pure)
-exe = EXE(
+
+# (1) one-folder build -> dist/Clippycap/   (used by the installer; faster cold start)
+exe_dir = EXE(
     pyz, a.scripts, [],
-    exclude_binaries=True,
-    name="Clippycap",
-    debug=False,
-    strip=False,
-    upx=False,
-    console=False,        # no console window; output goes to %APPDATA%/Clippycap/logs/clippycap.log
-    # icon=str(ROOT / "packaging" / "clippycap.ico"),   # drop a clippycap.ico here for a custom icon
+    exclude_binaries=True, name="Clippycap",
+    debug=False, strip=False, upx=False, console=False, icon=icon,
 )
-coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False, name="Clippycap")
+coll = COLLECT(exe_dir, a.binaries, a.datas, strip=False, upx=False, name="Clippycap")
+
+# (2) one-file build  -> dist/Clippycap-Portable.exe   (a single download-and-run file)
+exe_onefile = EXE(
+    pyz, a.scripts, a.binaries, a.datas, [],
+    name="Clippycap-Portable",
+    debug=False, strip=False, upx=False, console=False, icon=icon,
+)

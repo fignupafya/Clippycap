@@ -16,20 +16,20 @@ from pathlib import Path
 
 from clippycap.app.config_service import ConfigService
 from clippycap.app.editing_service import EditingService
+from clippycap.app.ffmpeg_service import FfmpegService
 from clippycap.app.jobs import ThreadJobQueue
 from clippycap.app.reference_service import ReferenceService, ReferenceTypeService
 from clippycap.app.scan_service import ScanService
 from clippycap.app.services import AssetService, NoteService, TagService
 from clippycap.app.source_service import SavedViewService, SourceService
 from clippycap.core.entities import ReferenceType
-from clippycap.core.ports import MetadataExtractor, Thumbnailer, VideoEditor
 from clippycap.infra.config import Config, ConfigHolder, load_config
 from clippycap.infra.config.loader import default_install_dir
 from clippycap.infra.db.database import SqliteDatabase
-from clippycap.infra.media.ffmpeg import resolve_ffmpeg_tools
-from clippycap.infra.media.video_editor import FfmpegVideoEditor, UnavailableVideoEditor
-from clippycap.infra.media.video_metadata import FfprobeMetadataExtractor, NoOpMetadataExtractor
-from clippycap.infra.media.video_thumbnail import FfmpegThumbnailer, UnavailableThumbnailer
+from clippycap.infra.media.ffmpeg import FfmpegToolsHolder, resolve_ffmpeg_tools
+from clippycap.infra.media.video_editor import FfmpegVideoEditor
+from clippycap.infra.media.video_metadata import FfprobeMetadataExtractor
+from clippycap.infra.media.video_thumbnail import FfmpegThumbnailer
 from clippycap.infra.scan.hashing import Blake3IdentityStrategy
 from clippycap.infra.scan.scanner import LibraryScanner
 from clippycap.media_types.video.video_media_type import VideoMediaType
@@ -49,6 +49,7 @@ class Application:
     """A fully wired application instance -- handed to the HTTP layer and the desktop shell."""
 
     config_holder: ConfigHolder
+    ffmpeg_tools: FfmpegToolsHolder
     database: SqliteDatabase
     event_bus: InProcessEventBus
     registries: Registries
@@ -63,41 +64,39 @@ class Application:
     scans: ScanService
     editing: EditingService
     config_service: ConfigService
+    ffmpeg: FfmpegService
     loaded_plugins: list[str]
     data_dir: Path
     thumbnail_dir: Path
     tag_images_dir: Path
     install_dir: Path
-    ffmpeg_available: bool
 
     @property
     def config(self) -> Config:
         """The currently active :class:`Config` (mutable via :class:`ConfigService`)."""
         return self.config_holder.current
 
+    @property
+    def ffmpeg_available(self) -> bool:
+        """Whether an ffmpeg binary is currently located (may change after an on-demand install)."""
+        return self.ffmpeg_tools.current.ffmpeg_path is not None
+
     def shutdown(self) -> None:
         self.jobs.shutdown()
 
 
-def _build_video_media_type(
-    config: Config, ffmpeg_path: Path | None, ffprobe_path: Path | None
-) -> VideoMediaType:
-    extractor: MetadataExtractor = (
-        FfprobeMetadataExtractor(ffprobe_path) if ffprobe_path is not None else NoOpMetadataExtractor()
-    )
-    thumbnailer: Thumbnailer = (
-        FfmpegThumbnailer(
-            ffmpeg_path, width=config.thumbnails.width, at_fraction=config.thumbnails.poster_at_fraction,
-            output_format=config.thumbnails.format,
-        )
-        if ffmpeg_path is not None
-        else UnavailableThumbnailer()
-    )
+def _build_video_media_type(config: Config, ffmpeg_tools: FfmpegToolsHolder) -> VideoMediaType:
+    # The extractor / thumbnailer always exist; they read the (possibly empty, possibly later-filled)
+    # ffmpeg paths from the shared holder, behaving as no-ops while ffmpeg isn't available.
     return VideoMediaType(
         extensions=config.media.video.extensions,
         recorded_at_patterns=config.media.video.recorded_at_filename_patterns,
         identity_strategy_name=config.media.video.identity_strategy,
-        metadata_extractor=extractor, thumbnailer=thumbnailer,
+        metadata_extractor=FfprobeMetadataExtractor(ffmpeg_tools),
+        thumbnailer=FfmpegThumbnailer(
+            ffmpeg_tools, width=config.thumbnails.width, at_fraction=config.thumbnails.poster_at_fraction,
+            output_format=config.thumbnails.format,
+        ),
     )
 
 
@@ -125,7 +124,7 @@ def build_application(
         install_dir_override=install_dir_override, env=env,
     )
     install_dir = install_dir_override or default_install_dir()
-    ffmpeg_path, ffprobe_path = resolve_ffmpeg_tools(config, install_dir)
+    ffmpeg_tools = FfmpegToolsHolder(resolve_ffmpeg_tools(config, install_dir))
     data_dir = Path(config.app.data_dir)
     thumbnail_dir = Path(config.thumbnails.cache_dir)
     tag_images_dir = data_dir / TAG_IMAGES_DIRNAME
@@ -139,7 +138,7 @@ def build_application(
     event_bus = InProcessEventBus()
     registries = Registries()
     registries.identity_strategies.register("blake3", Blake3IdentityStrategy())
-    registries.media_types.register("video", _build_video_media_type(config, ffmpeg_path, ffprobe_path))
+    registries.media_types.register("video", _build_video_media_type(config, ffmpeg_tools))
 
     plugin_context = PluginContext(
         registries=registries, event_bus=event_bus, config=config, data_dir=data_dir,
@@ -158,10 +157,7 @@ def build_application(
     jobs = ThreadJobQueue()
 
     config_holder = ConfigHolder(config)
-    if ffmpeg_path is not None:
-        video_editor: VideoEditor = FfmpegVideoEditor(ffmpeg_path, config_holder=config_holder)
-    else:
-        video_editor = UnavailableVideoEditor()
+    video_editor = FfmpegVideoEditor(tools=ffmpeg_tools, config_holder=config_holder)
     editing_service = EditingService(
         database, video_editor, dict(registries.media_types.items()),
         dict(registries.identity_strategies.items()), event_bus, config_holder, thumbnail_dir,
@@ -170,14 +166,19 @@ def build_application(
         holder=config_holder, default_toml_path=default_toml_path,
         data_dir=data_dir, install_dir=install_dir, env=env,
     )
+    ffmpeg_service = FfmpegService(
+        tools_holder=ffmpeg_tools, config_holder=config_holder, config_service=config_service,
+        jobs=jobs, data_dir=data_dir, install_dir=install_dir,
+    )
 
     return Application(
-        config_holder=config_holder, database=database, event_bus=event_bus, registries=registries, jobs=jobs,
+        config_holder=config_holder, ffmpeg_tools=ffmpeg_tools, database=database, event_bus=event_bus,
+        registries=registries, jobs=jobs,
         assets=AssetService(database, event_bus, thumbnail_dir), tags=TagService(database, event_bus, tag_images_dir),
         notes=NoteService(database, event_bus), references=ReferenceService(database, event_bus),
         reference_types=ReferenceTypeService(database), sources=SourceService(database, event_bus),
         saved_views=SavedViewService(database), scans=ScanService(database, scanner, jobs, event_bus),
-        editing=editing_service, config_service=config_service, loaded_plugins=loaded_plugins,
-        data_dir=data_dir, thumbnail_dir=thumbnail_dir,
-        tag_images_dir=tag_images_dir, install_dir=install_dir, ffmpeg_available=ffmpeg_path is not None,
+        editing=editing_service, config_service=config_service, ffmpeg=ffmpeg_service,
+        loaded_plugins=loaded_plugins, data_dir=data_dir, thumbnail_dir=thumbnail_dir,
+        tag_images_dir=tag_images_dir, install_dir=install_dir,
     )
