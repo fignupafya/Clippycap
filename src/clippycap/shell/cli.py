@@ -65,6 +65,9 @@ _QUIET_FEATURES = ",".join((
     "Translate", "msEdgeWelcomeUX", "msEdgeFirstRunUX", "EdgeWelcomeUX", "msImplicitSignin",
     "msSpartanFeatures", "msEdgeSplitScreen", "msUndersideButton", "msSidebarV2", "msEdgeSideBarV2",
     "msEdgeCopilot", "msEdgeDiscoverEntrypoint", "EdgeDiscoverEntrypoint", "msEdgeNTPCardsRefresh",
+    # Edge's built-in "features" that behave like extensions and like to pop their own windows/tabs:
+    "msEdgeShoppingFeature", "msEdgeCoupons", "EdgeShoppingAssistant", "msEdgeCollections",
+    "msEdgeAutofillFeatureFlag", "msEdgeEditorFeature", "EdgeEditor", "msEdgeReadAloud",
 ))
 
 
@@ -105,9 +108,10 @@ def _open_app_window(url: str, shell: ShellConfig) -> bool:
             exe, f"--app={url}", f"--user-data-dir={profile}",
             f"--window-size={shell.window_width},{shell.window_height}",
             "--no-first-run", "--no-default-browser-check", "--disable-search-engine-choice-screen",
-            "--disable-extensions", "--disable-sync", "--disable-component-update",
-            "--disable-background-networking", "--disable-default-apps", "--no-service-autorun",
-            "--password-store=basic", f"--disable-features={_QUIET_FEATURES}",
+            "--disable-extensions", "--disable-component-extensions-with-background-pages",
+            "--disable-sync", "--disable-component-update", "--disable-background-networking",
+            "--disable-default-apps", "--no-service-autorun", "--password-store=basic",
+            f"--disable-features={_QUIET_FEATURES}",
         ])
     except OSError:
         shutil.rmtree(profile, ignore_errors=True)
