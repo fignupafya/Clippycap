@@ -1,11 +1,11 @@
 """Editing the app's own configuration through the UI.
 
-Writes user overrides into ``<data_dir>/local.toml`` (atomically) and returns a freshly merged
-:class:`~clippycap.infra.config.Config`. The caller (the HTTP route) replaces the running
-:class:`~clippycap.app.bootstrap.Application`'s ``config`` field with the new one -- frontend-facing
-settings (player, keybindings) take effect immediately because the UI re-fetches via
-``GET /api/config``; backend services (the ffmpeg editor, the scanner, the thumbnailer) captured
-their config values at startup, so changes there only land on the next app launch.
+Writes user overrides into ``<data_dir>/local.toml`` (atomically, deep-merged onto whatever is there)
+and returns a freshly merged :class:`~clippycap.infra.config.Config`. After a successful update the
+shared :class:`~clippycap.infra.config.ConfigHolder` is swapped, so the services that read it through
+the holder -- the ffmpeg video editor, the editing service, the ffmpeg resolver -- pick up the new
+values on their very next call; the frontend re-fetches via ``GET /api/config``. If the merged result
+fails validation the previous ``local.toml`` is restored so the running app stays in a valid state.
 """
 
 from __future__ import annotations
@@ -21,6 +21,18 @@ import tomli_w
 from clippycap.infra.config import LOCAL_FILENAME, Config, ConfigError, ConfigHolder, load_config
 
 _log = logging.getLogger(__name__)
+
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Recursively merge ``override`` onto a copy of ``base`` (sub-tables merge; scalars replace)."""
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        existing = merged.get(key)
+        if isinstance(value, Mapping) and isinstance(existing, Mapping):
+            merged[key] = _deep_merge(existing, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 class ConfigService:
@@ -45,28 +57,28 @@ class ConfigService:
     def update(
         self,
         *,
-        editing: dict[str, Any] | None = None,
-        player: dict[str, Any] | None = None,
-        keybindings: dict[str, str] | None = None,
+        editing: Mapping[str, Any] | None = None,
+        player: Mapping[str, Any] | None = None,
+        keybindings: Mapping[str, str] | None = None,
+        media: Mapping[str, Any] | None = None,
     ) -> Config:
-        """Apply a partial override, persist it, and return the reloaded :class:`Config`.
+        """Apply a partial override, persist it (deep-merged onto ``local.toml``), and return the
+        reloaded :class:`Config`. Sections passed as ``None`` are left untouched.
 
-        Sections set to ``None`` are left untouched. If the reload fails validation, the previous
-        ``local.toml`` is restored so the running app stays in a valid state.
+        :raises ConfigError: if the merged configuration fails validation -- ``local.toml`` is
+            rolled back to its previous contents before the error propagates.
         """
-        previous = self._read_local()
-        next_local: dict[str, Any] = dict(previous)
-        sections: list[str] = []
+        overrides: dict[str, Any] = {}
         if editing is not None:
-            next_local["editing"] = dict(editing)
-            sections.append("editing")
+            overrides["editing"] = dict(editing)
         if player is not None:
-            next_local["player"] = dict(player)
-            sections.append("player")
+            overrides["player"] = dict(player)
         if keybindings is not None:
-            next_local["keybindings"] = dict(keybindings)
-            sections.append("keybindings")
-        self._write_local(next_local)
+            overrides["keybindings"] = dict(keybindings)
+        if media is not None:
+            overrides["media"] = dict(media)
+        previous = self._read_local()
+        self._write_local(_deep_merge(previous, overrides))
         try:
             config = load_config(
                 default_path=self._default_toml_path,
@@ -75,11 +87,10 @@ class ConfigService:
                 env=self._env,
             )
         except ConfigError:
-            # roll back so the running app stays valid
-            self._write_local(previous)
+            self._write_local(previous)                      # keep the running app on a valid config
             raise
-        self._holder.current = config       # live: the ffmpeg editor + the editing service see this on the next call
-        _log.info("config updated (%s)", ", ".join(sections) if sections else "<no changes>")
+        self._holder.current = config       # live: the ffmpeg editor + editing service + resolver see this next call
+        _log.info("config updated (%s)", ", ".join(overrides) if overrides else "<no changes>")
         return config
 
     def _read_local(self) -> dict[str, Any]:

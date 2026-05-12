@@ -2,8 +2,9 @@
 
 :class:`FfprobeMetadataExtractor` runs ``ffprobe -show_format -show_streams`` and pulls out
 ``duration_ms``, ``width``, ``height``, ``fps``, ``codec`` and ``recorded_at`` (from the container's
-``creation_time`` tag, if any). :class:`NoOpMetadataExtractor` returns ``{}`` -- used when ffmpeg is
-disabled; the frontend then reports what it discovers from the ``<video>`` element instead.
+``creation_time`` tag, if any). It reads the ffprobe path from a shared :class:`FfmpegToolsHolder`,
+so when no ffprobe is available -- or until the user installs one -- :meth:`extract` returns ``{}``
+and the frontend reports what it discovers from the ``<video>`` element instead.
 """
 
 from __future__ import annotations
@@ -13,6 +14,8 @@ import logging
 import subprocess
 from pathlib import Path
 from typing import Any
+
+from clippycap.infra.media.ffmpeg import FfmpegToolsHolder
 
 _log = logging.getLogger(__name__)
 _PROBE_TIMEOUT = 30
@@ -80,13 +83,16 @@ def parse_ffprobe(data: dict[str, Any]) -> dict[str, Any]:
 
 
 class FfprobeMetadataExtractor:
-    def __init__(self, ffprobe_path: Path) -> None:
-        self._ffprobe = ffprobe_path
+    def __init__(self, tools: FfmpegToolsHolder) -> None:
+        self._tools = tools
 
     def extract(self, path: Path) -> dict[str, Any]:
+        ffprobe = self._tools.current.ffprobe_path
+        if ffprobe is None:                                  # no ffprobe (yet) -> the frontend fills in
+            return {}
         try:
             completed = subprocess.run(
-                [str(self._ffprobe), "-v", "quiet", "-print_format", "json",
+                [str(ffprobe), "-v", "quiet", "-print_format", "json",
                  "-show_format", "-show_streams", str(path)],
                 capture_output=True, text=True, timeout=_PROBE_TIMEOUT, check=False,
             )
@@ -100,9 +106,3 @@ class FfprobeMetadataExtractor:
         except (ValueError, TypeError):
             return {}
         return parse_ffprobe(data) if isinstance(data, dict) else {}
-
-
-class NoOpMetadataExtractor:
-    def extract(self, path: Path) -> dict[str, Any]:
-        _ = path
-        return {}

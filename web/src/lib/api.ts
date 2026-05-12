@@ -46,6 +46,13 @@ export interface AppConfig {
   editing: EditingConfig; player: PlayerConfig; keybindings: Record<string, string>;
   [key: string]: unknown;
 }
+export interface FfmpegStatus {
+  available: boolean; ffprobe_available: boolean;
+  ffmpeg_path: string | null; ffprobe_path: string | null; version: string | null;
+  enabled: boolean; configured_path: string | null;
+  offer_install: boolean; can_install: boolean;
+  installing: boolean; install_job_id: string | null;
+}
 type EditedAsset = { id: number; title: string };
 
 interface AssetQuery {
@@ -84,6 +91,11 @@ export const api = {
   updateConfig: (patch: { editing?: EditingConfig; player?: PlayerConfig; keybindings?: Record<string, string> }) =>
     req<AppConfig>('PUT', '/api/config', patch),
   getHealth: () => req<Health>('GET', '/api/health'),
+  getFfmpegStatus: () => req<FfmpegStatus>('GET', '/api/ffmpeg'),
+  installFfmpeg: () => req<{ job_id: string }>('POST', '/api/ffmpeg/install'),
+  setFfmpegPath: (path: string) => req<FfmpegStatus>('POST', '/api/ffmpeg/path', { path }),
+  resetFfmpegPath: () => req<FfmpegStatus>('POST', '/api/ffmpeg/auto'),
+  dismissFfmpegPrompt: () => req<void>('POST', '/api/ffmpeg/dismiss-prompt'),
   listAssets: (q: AssetQuery = {}) => req<AssetPage>('GET', `/api/assets${qs(q as Record<string, unknown>)}`),
   getAsset: (id: number) => req<AssetDetail>('GET', `/api/assets/${id}`),
   markOpened: (id: number) => req<void>('POST', `/api/assets/${id}/opened`),

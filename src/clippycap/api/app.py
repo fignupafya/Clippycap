@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from clippycap.app.bootstrap import Application
+from clippycap.app.ffmpeg_service import FfmpegStatus
 from clippycap.app.reference_service import ReferenceView
 from clippycap.app.services import AssetDetail, AssetSummary, NoteView
 from clippycap.core.entities import Asset, ReferenceType, Source, Tag
@@ -91,6 +92,16 @@ def _ref_view_dict(view: ReferenceView) -> dict[str, Any]:
     }
 
 
+def _ffmpeg_status_dict(s: FfmpegStatus) -> dict[str, Any]:
+    return {
+        "available": s.available, "ffprobe_available": s.ffprobe_available,
+        "ffmpeg_path": s.ffmpeg_path, "ffprobe_path": s.ffprobe_path, "version": s.version,
+        "enabled": s.enabled, "configured_path": s.configured_path,
+        "offer_install": s.offer_install, "can_install": s.can_install,
+        "installing": s.installing, "install_job_id": s.install_job_id,
+    }
+
+
 def _reference_type_dict(rt: ReferenceType) -> dict[str, Any]:
     return {
         "id": rt.id, "name": rt.name, "reverse_name": rt.reverse_name,
@@ -142,6 +153,10 @@ class ConfigPatchBody(BaseModel):
     editing: EditingConfig | None = None
     player: PlayerConfig | None = None
     keybindings: dict[str, str] | None = None
+
+
+class FfmpegPathBody(BaseModel):
+    path: str = Field(min_length=1)
 
 
 class GeneralNoteBody(BaseModel):
@@ -653,6 +668,29 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
             keybindings=body.keybindings,
         )
         return new_config.model_dump(mode="json")
+
+    # ---- ffmpeg: status, on-demand install, point at an existing build ---
+
+    @api.get("/api/ffmpeg")
+    def ffmpeg_status(app: AppDep) -> dict[str, Any]:
+        return _ffmpeg_status_dict(app.ffmpeg.status())
+
+    @api.post("/api/ffmpeg/install", status_code=202)
+    def ffmpeg_install(app: AppDep) -> dict[str, str]:
+        return {"job_id": app.ffmpeg.start_install()}        # poll GET /api/jobs/{job_id} for progress
+
+    @api.post("/api/ffmpeg/path")
+    def ffmpeg_set_path(app: AppDep, body: FfmpegPathBody) -> dict[str, Any]:
+        return _ffmpeg_status_dict(app.ffmpeg.use_path(body.path))
+
+    @api.post("/api/ffmpeg/auto")
+    def ffmpeg_use_auto(app: AppDep) -> dict[str, Any]:
+        return _ffmpeg_status_dict(app.ffmpeg.use_auto())
+
+    @api.post("/api/ffmpeg/dismiss-prompt", status_code=204)
+    def ffmpeg_dismiss_prompt(app: AppDep) -> Response:
+        app.ffmpeg.dismiss_install_prompt()
+        return Response(status_code=204)
 
     @api.get("/api/plugins")
     def list_plugins(app: AppDep) -> list[str]:

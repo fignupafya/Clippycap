@@ -1,4 +1,6 @@
-# Fetch a static ffmpeg/ffprobe into bin/ so the build can bundle them.
+# Fetch a static ffmpeg/ffprobe into bin/ -- handy for local development (the resolver checks
+# <repo>/bin via the "@bundled" location). The packaged app does NOT bundle ffmpeg; it downloads
+# this same build on demand into %APPDATA%\Clippycap\bin\ instead -- see packaging/README.md.
 # Run:  powershell -ExecutionPolicy Bypass -File packaging\get_ffmpeg.ps1
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)          # -> repo root

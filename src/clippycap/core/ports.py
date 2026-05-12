@@ -178,9 +178,14 @@ class MetadataExtractor(Protocol):
 
 
 class Thumbnailer(Protocol):
-    """Generates a thumbnail server-side. ``available is False`` => the frontend captures one."""
+    """Generates a thumbnail server-side. ``available is False`` => the frontend captures one.
 
-    available: bool
+    (Read-only -- an ffmpeg-backed implementation may flip ``available`` to ``True`` once ffmpeg is
+    installed at runtime, so it's a property rather than a fixed flag.)
+    """
+
+    @property
+    def available(self) -> bool: ...
 
     def make(self, path: Path, out_path: Path, *, metadata: Mapping[str, Any]) -> bool: ...
 
@@ -202,10 +207,12 @@ class MediaTypeProvider(Protocol):
 class VideoEditor(Protocol):
     """Cuts and re-assembles video files (ffmpeg-backed). Times are in **milliseconds**.
 
-    ``available is False`` when no ffmpeg binary is configured -- callers must check it first.
+    ``available is False`` when no ffmpeg binary is located -- callers must check it first. (It's a
+    read-only property: an on-demand ffmpeg install can flip it to ``True`` while the app runs.)
     """
 
-    available: bool
+    @property
+    def available(self) -> bool: ...
 
     def keep_range(self, source: Path, out_path: Path, *, start_ms: int, end_ms: int) -> bool:
         """Write ``out_path`` containing only ``source``'s ``[start_ms, end_ms]``."""

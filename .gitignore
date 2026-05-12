@@ -48,3 +48,7 @@ desktop.ini
 # bundled ffmpeg / ffprobe -- fetched or copied locally, never committed
 /bin/
 packaging/bin/
+
+# --- packaged executables (output of packaging/build.ps1, placed in the repo root; never committed) ---
+/Clippycap-Portable.exe
+/Clippycap-Setup.exe

@@ -86,10 +86,16 @@ regenerate_on_metadata_change = true
 # When false, ffmpeg/ffprobe are not used at all: thumbnails are captured client-side
 # (a frame from the <video> element) and only browser-available metadata is recorded.
 enabled           = true
-# "@bundled" -> use the ffmpeg/ffprobe shipped with the app. Or an absolute path, or
-# "auto" -> search PATH. If enabled and not found, the app shows install guidance.
-ffmpeg_path       = "auto"     
-ffprobe_path      = "auto"     
+# "auto"  -> search <data_dir>/bin (where an on-demand install / the installer puts a downloaded
+#            build), then the bundle dir, then common install locations, then PATH.
+# "@bundled" -> only the ffmpeg/ffprobe shipped next to the app.
+# or an absolute path to ffmpeg.exe / ffprobe.exe.
+ffmpeg_path       = "auto"
+ffprobe_path      = "auto"
+# When ffmpeg can't be located on startup, offer (once) to download a static build the first time the
+# app opens. Once you decline this never re-prompts; you can still install it from Settings > FFmpeg.
+# (Windows only -- elsewhere, install ffmpeg with your package manager.)
+offer_install_if_missing = true
 
 [media.video]
 # File extensions recognised as videos by the built-in VideoMediaType.

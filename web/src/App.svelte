@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
@@ -65,13 +65,16 @@
   let showTags = $state(false);
   let showKeys = $state(false);
   let showSettings = $state(false);
-  let settingsTab = $state<'editing' | 'player' | 'keys'>('editing');
+  let settingsTab = $state<'editing' | 'player' | 'keys' | 'ffmpeg'>('editing');
   let pendingEditing = $state<EditingConfig | null>(null);
   let pendingPlayer = $state<PlayerConfig | null>(null);
   let pendingKeybindings = $state<Record<string, string> | null>(null);
   let capturingAction = $state<string | null>(null);
   let savingSettings = $state(false);
   let settingsError = $state<string | null>(null);
+  let ffmpegStatus = $state<FfmpegStatus | null>(null);
+  let ffmpegInstalling = $state(false);
+  let ffmpegInstallMsg = $state('');
   let newTagName = $state('');
   let newTagColor = $state('#56c271');
   let tagIcon = $state('');
@@ -173,6 +176,7 @@
     void loadTags(); void loadSources();
     void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
     void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
+    void refreshFfmpegStatus(true);   // and prompt to install ffmpeg the first time, if it's missing
     void api.listSavedViews().then((v) => { savedViews = v; }).catch(() => { /* none */ });
     void syncFromHash();   // open the clip in the URL hash, if any
   });
@@ -363,6 +367,68 @@
       } catch (e) { scanJob = null; toast(String(e), 'error'); }
     })();
   }
+  // ---- ffmpeg: status / on-demand install / point at an existing build ----
+  async function refreshFfmpegStatus(offerIfMissing = false) {
+    try {
+      const s = await api.getFfmpegStatus();
+      ffmpegStatus = s;
+      editingAvailable = s.available;
+      if (offerIfMissing && s.offer_install && !ffmpegInstalling) void offerFfmpegInstall();
+    } catch { /* ignore -- the app works without ffmpeg */ }
+  }
+  async function offerFfmpegInstall() {
+    const yes = await confirmDialog('FFmpeg isn’t installed', {
+      detail: 'Clippycap uses FFmpeg to make clip thumbnails and to trim / cut clips. Without it, '
+        + 'thumbnails are captured in the browser and trimming is disabled. Download and install a '
+        + 'static build now (~80 MB)? You can always do this later from Settings → FFmpeg.',
+      okLabel: 'Install FFmpeg',
+    });
+    if (yes) { void startFfmpegInstall(); return; }
+    try { await api.dismissFfmpegPrompt(); } catch { /* ignore */ }
+    if (ffmpegStatus) ffmpegStatus = { ...ffmpegStatus, offer_install: false };
+    toast('OK — you can install FFmpeg later from Settings → FFmpeg.');
+  }
+  function startFfmpegInstall() {
+    if (ffmpegInstalling) return;
+    ffmpegInstalling = true; ffmpegInstallMsg = 'Starting…';
+    void (async () => {
+      try {
+        const { job_id } = await api.installFfmpeg();
+        const tick = async () => {
+          const j = await api.getJob(job_id);
+          if (j.state === 'pending' || j.state === 'running') {
+            ffmpegInstallMsg = j.total && j.scanned ? `${Math.min(100, Math.round((100 * j.scanned) / j.total))}%`
+              : (j.message || 'Downloading…');
+            setTimeout(() => void tick(), 500);
+          } else if (j.state === 'done') {
+            ffmpegInstalling = false; ffmpegInstallMsg = '';
+            await refreshFfmpegStatus(false);
+            toast('FFmpeg installed. Reopen a clip to see generated thumbnails.', 'success');
+          } else {
+            ffmpegInstalling = false; ffmpegInstallMsg = '';
+            toast('FFmpeg install failed: ' + (j.error || 'unknown error'), 'error');
+          }
+        };
+        await tick();
+      } catch (e) { ffmpegInstalling = false; ffmpegInstallMsg = ''; toast('FFmpeg install failed: ' + String(e), 'error'); }
+    })();
+  }
+  async function pickFfmpegPath() {
+    const p = await promptDialog('Path to ffmpeg.exe — or to the folder that contains ffmpeg.exe and ffprobe.exe',
+      { placeholder: 'C:\\ffmpeg\\bin', okLabel: 'Use this' });
+    if (p === null) return;
+    try {
+      ffmpegStatus = await api.setFfmpegPath(p);
+      editingAvailable = ffmpegStatus.available;
+      toast(ffmpegStatus.available ? 'Using that FFmpeg now.' : 'Saved, but FFmpeg still isn’t available there.',
+        ffmpegStatus.available ? 'success' : 'error');
+    } catch (e) { toast(String(e), 'error'); }
+  }
+  async function resetFfmpegToAuto() {
+    try { ffmpegStatus = await api.resetFfmpegPath(); editingAvailable = ffmpegStatus.available; toast('Back to auto-detect.'); }
+    catch (e) { toast(String(e), 'error'); }
+  }
+
   function startEditTag(t: Tag) { editingTagId = t.id; newTagName = t.name; newTagColor = t.color; tagIcon = t.icon ?? ''; tagImageRef = t.image_ref; }
   function cancelEditTag() { editingTagId = null; newTagName = ''; tagIcon = ''; tagImageRef = null; }
   function removeTagImage() { tagImageRef = null; }
@@ -670,6 +736,7 @@
     pendingKeybindings = { ...cfg.keybindings };
     capturingAction = null; settingsError = null; settingsTab = 'editing';
     showSettings = true;
+    void refreshFfmpegStatus(false);
   }
   function closeSettings() {
     showSettings = false; capturingAction = null;
@@ -1092,6 +1159,7 @@
         <button class:on={settingsTab === 'editing'} onclick={() => (settingsTab = 'editing')}>Editing</button>
         <button class:on={settingsTab === 'player'} onclick={() => (settingsTab = 'player')}>Player</button>
         <button class:on={settingsTab === 'keys'} onclick={() => (settingsTab = 'keys')}>Keyboard</button>
+        <button class:on={settingsTab === 'ffmpeg'} onclick={() => { settingsTab = 'ffmpeg'; void refreshFfmpegStatus(false); }}>FFmpeg</button>
       </div>
       <div class="mbody">
         {#if settingsTab === 'editing' && pendingEditing}
@@ -1128,6 +1196,41 @@
               </button>
             </div>
           {/each}
+        {:else if settingsTab === 'ffmpeg'}
+          {#if ffmpegStatus}
+            <div class="srow"><span class="slabel">Status</span>
+              <span>{ffmpegStatus.available ? '✓ Available' : '✗ Not found'}{ffmpegStatus.available && ffmpegStatus.version ? ` — ${ffmpegStatus.version}` : ''}</span></div>
+            {#if ffmpegStatus.ffmpeg_path}
+              <div class="srow"><span class="slabel">ffmpeg</span>
+                <span class="faint" style:font-size="12px" style:word-break="break-all">{ffmpegStatus.ffmpeg_path}{ffmpegStatus.configured_path ? '  (set here)' : ''}</span></div>
+            {/if}
+            {#if ffmpegStatus.ffprobe_path}
+              <div class="srow"><span class="slabel">ffprobe</span>
+                <span class="faint" style:font-size="12px" style:word-break="break-all">{ffmpegStatus.ffprobe_path}</span></div>
+            {:else}
+              <div class="srow"><span class="slabel">ffprobe</span><span class="faint" style:font-size="12px">— not found (video metadata falls back to the browser)</span></div>
+            {/if}
+            {#if !ffmpegStatus.enabled}
+              <p class="faint" style:font-size="12px" style:margin-top="8px">FFmpeg is turned off in the configuration ([media.ffmpeg].enabled = false). Enable it in <code>local.toml</code> to use it.</p>
+            {/if}
+            <div class="srow" style:margin-top="10px"><span class="slabel"></span>
+              <span style:display="flex" style:gap="8px" style:flex-wrap="wrap">
+                {#if !ffmpegStatus.available && ffmpegStatus.can_install}
+                  <button class="btn sm primary" onclick={startFfmpegInstall} disabled={ffmpegInstalling}>{ffmpegInstalling ? (ffmpegInstallMsg || 'Installing…') : 'Download & install FFmpeg'}</button>
+                {:else if ffmpegInstalling}
+                  <button class="btn sm" disabled>{ffmpegInstallMsg || 'Installing…'}</button>
+                {/if}
+                <button class="btn sm" onclick={pickFfmpegPath} disabled={ffmpegInstalling}>Use FFmpeg from another folder…</button>
+                {#if ffmpegStatus.configured_path}
+                  <button class="btn sm" onclick={resetFfmpegToAuto} disabled={ffmpegInstalling}>Back to auto-detect</button>
+                {/if}
+              </span></div>
+            {#if !ffmpegStatus.can_install && !ffmpegStatus.available}
+              <p class="faint" style:font-size="12px" style:margin-top="8px">Automatic install is Windows-only. On Linux/macOS, install ffmpeg with your package manager (e.g. <code>apt install ffmpeg</code> / <code>brew install ffmpeg</code>) and reopen Clippycap — or use the button above to point at it.</p>
+            {/if}
+          {:else}
+            <p class="faint">Loading…</p>
+          {/if}
         {/if}
         {#if settingsError}<div class="err" style:margin-top="10px">{settingsError}</div>{/if}
       </div>
