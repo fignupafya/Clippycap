@@ -70,7 +70,9 @@ def os_appdata_dir() -> Path:
 def default_install_dir() -> Path:
     """Where the app is installed/run from: the bundle dir when frozen, else the repo root."""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        # PyInstaller: bundled data (config/, web/dist/, bin/) lives in sys._MEIPASS -- a temp dir for
+        # a one-file build, or the _internal/ dir for a one-folder build; fall back to the exe's dir.
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
     # this file is src/clippycap/infra/config/loader.py:
     #   parents -> [0]=config [1]=infra [2]=clippycap [3]=src [4]=repo root
     return Path(__file__).resolve().parents[4]

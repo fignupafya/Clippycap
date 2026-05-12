@@ -28,6 +28,7 @@ dev = [
 # uses a chromeless Edge/Chrome "--app" window, or falls back to a normal browser tab. On Windows it
 # also needs the Edge WebView2 runtime, and pywebview's pythonnet dep has no wheels for Python 3.14 yet.
 window = ["pywebview>=5.1"]
+build = ["pyinstaller>=6.0"]    # bundle a standalone .exe -- see packaging/
 
 [project.scripts]
 clippycap = "clippycap.shell.cli:main"
