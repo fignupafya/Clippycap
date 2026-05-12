@@ -51,14 +51,21 @@ def _build(data_dir: Path | None) -> Application:
 
 
 # Chromium "app mode" (a chromeless window, no tabs / address bar) -- the fallback when pywebview
-# isn't installed. Each entry is searched (env-vars expanded) for an existing executable.
+# isn't installed. Chrome first (its app mode is quieter than Edge's), then Edge (on every Windows).
 _APP_BROWSERS = (
-    r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
-    r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
     r"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
     r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
     r"%LocalAppData%\Google\Chrome\Application\chrome.exe",
+    r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe",
+    r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe",
 )
+# Edge especially likes to pop welcome / sidebar / Copilot / Discover windows on a fresh profile;
+# turn off as many of those as we can (Chromium just ignores flag names it doesn't know).
+_QUIET_FEATURES = ",".join((
+    "Translate", "msEdgeWelcomeUX", "msEdgeFirstRunUX", "EdgeWelcomeUX", "msImplicitSignin",
+    "msSpartanFeatures", "msEdgeSplitScreen", "msUndersideButton", "msSidebarV2", "msEdgeSideBarV2",
+    "msEdgeCopilot", "msEdgeDiscoverEntrypoint", "EdgeDiscoverEntrypoint", "msEdgeNTPCardsRefresh",
+))
 
 
 def _show_native_window(url: str, shell: ShellConfig) -> bool:
@@ -95,8 +102,12 @@ def _open_app_window(url: str, shell: ShellConfig) -> bool:
     profile = tempfile.mkdtemp(prefix="clippycap-window-")          # an isolated profile so closing the window exits it
     try:
         proc = subprocess.Popen([
-            exe, f"--app={url}", "--new-window", "--no-first-run", "--no-default-browser-check",
-            f"--user-data-dir={profile}", f"--window-size={shell.window_width},{shell.window_height}",
+            exe, f"--app={url}", f"--user-data-dir={profile}",
+            f"--window-size={shell.window_width},{shell.window_height}",
+            "--no-first-run", "--no-default-browser-check", "--disable-search-engine-choice-screen",
+            "--disable-extensions", "--disable-sync", "--disable-component-update",
+            "--disable-background-networking", "--disable-default-apps", "--no-service-autorun",
+            "--password-store=basic", f"--disable-features={_QUIET_FEATURES}",
         ])
     except OSError:
         shutil.rmtree(profile, ignore_errors=True)
