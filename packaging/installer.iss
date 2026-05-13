@@ -1,17 +1,19 @@
 ; Inno Setup script for Clippycap. Builds  dist\Clippycap-Setup.exe  from the one-folder PyInstaller
-; build in  dist\Clippycap\  (so run packaging\build.ps1 -- or at least `pyinstaller packaging\clippycap.spec`
+; build in  dist\Clippycap\  (so run build.ps1 -- or at least `pyinstaller packaging\clippycap.spec`
 ; -- first). Requires Inno Setup 6.1 or newer (for the built-in downloader). Compile with:
 ;
-;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\installer.iss
+;   "<Inno Setup 6 folder>\ISCC.exe" packaging\installer.iss
 ;
-; packaging\build.ps1 does this automatically when Inno Setup is installed; if it isn't, install it from
-; https://jrsoftware.org/isdl.php -- the script and the .exe are open and reproducible from source.
+; build.ps1 (at the repo root) does this automatically when Inno Setup is installed (and then moves
+; Clippycap-Setup.exe to the repo root); if it isn't, install it from https://jrsoftware.org/isdl.php
+; -- the script and the .exe are open and reproducible from source.
 ;
-; What it does that's special: if ffmpeg isn't already available, it offers (a ticked task on the
-; "Select Additional Tasks" page) to download BtbN's static ffmpeg/ffprobe build and drop it into
-; %APPDATA%\Clippycap\bin\ -- exactly where the app's own "auto" detection looks first. If the user
-; declines, or the download fails, the install still completes (ffmpeg is optional; the app can fetch
-; it later from Settings > FFmpeg).
+; What it does that's special: on the "Select Additional Tasks" page it offers (ticked) to
+;   - install the Microsoft Edge WebView2 Runtime, if it's missing (Clippycap's app window uses it;
+;     without it the app falls back to a chromeless Chrome/Edge "--app" window);
+;   - download BtbN's static ffmpeg/ffprobe build into %APPDATA%\Clippycap\bin\ (where the app's
+;     own "auto" detection looks first), if ffmpeg isn't already around.
+; Either task can be unticked, and either download failing is non-fatal -- the install still completes.
 
 #define AppName        "Clippycap"
 #define AppVersion     "0.1.0"
@@ -19,6 +21,7 @@
 #define AppExeName     "Clippycap.exe"
 #define AppSourceDir   "..\dist\Clippycap"
 #define FfmpegUrl      "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip"
+#define WebView2Url    "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
 
 [Setup]
 ; A stable, unique GUID for this product (so upgrades replace, rather than stack).
@@ -40,13 +43,14 @@ WizardStyle=modern
 PrivilegesRequired=lowest
 ArchitecturesAllowed=x64
 ArchitecturesInstallIn64BitMode=x64
-;SetupIconFile=clippycap.ico
+SetupIconFile=clippycap.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "webview2"; Description: "Install the Microsoft Edge WebView2 Runtime (~2 MB) - Clippycap's app window uses it"; Check: ShouldOfferWebView2
 Name: "ffmpeg"; Description: "Download && install FFmpeg (~80 MB) - needed for clip thumbnails and trimming / cutting"; Check: ShouldOfferFfmpeg
 
 [Files]
@@ -62,8 +66,8 @@ Filename: "{app}\{#AppExeName}"; Description: "{cm:LaunchProgram,{#AppName}}"; F
 
 [Code]
 var
-  FfmpegChecked: Boolean;
-  FfmpegPresent: Boolean;
+  FfmpegChecked, FfmpegPresent: Boolean;
+  WebView2Checked, WebView2Present: Boolean;
   DownloadPage: TDownloadWizardPage;
 
 function SQ(const S: String): String;        { wrap S in single quotes, for embedding in a PowerShell command }
@@ -95,6 +99,27 @@ begin
   Result := not IsFfmpegPresent;            { task hidden (and not run) when ffmpeg is already around }
 end;
 
+function IsWebView2Present: Boolean;
+var v: String;
+begin
+  if not WebView2Checked then
+  begin
+    WebView2Checked := True;
+    // The Evergreen WebView2 Runtime records its version in the value 'pv' under the EdgeUpdate
+    // "Clients" key for GUID F3017226-FE2A-4295-8BDF-00C3A9A7E4C5. HKLM (32-bit view -> WOW6432Node)
+    // covers the machine-wide x64 install; HKCU covers a per-user install.
+    WebView2Present :=
+      (RegQueryStringValue(HKEY_LOCAL_MACHINE, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', v) and (v <> '') and (v <> '0.0.0.0')) or
+      (RegQueryStringValue(HKEY_CURRENT_USER,  'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', v) and (v <> '') and (v <> '0.0.0.0'));
+  end;
+  Result := WebView2Present;
+end;
+
+function ShouldOfferWebView2: Boolean;
+begin
+  Result := not IsWebView2Present;
+end;
+
 function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
 begin
   Result := True;                           { keep going (the page shows the progress bar itself) }
@@ -106,29 +131,55 @@ begin
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  Queued: Boolean;
 begin
   Result := True;
-  if (CurPageID = wpReady) and IsTaskSelected('ffmpeg') then
+  if CurPageID <> wpReady then exit;
+  Queued := False;
+  DownloadPage.Clear;
+  if IsTaskSelected('webview2') then
   begin
-    DownloadPage.Clear;
-    DownloadPage.Add('{#FfmpegUrl}', 'ffmpeg.zip', '');     { empty hash = no verification (it's a moving "latest" build) }
-    DownloadPage.Show;
-    try
-      try
-        DownloadPage.Download;
-      except
-        if DownloadPage.AbortedByUser then
-          Result := False
-        else
-          SuppressibleMsgBox(
-            'Could not download FFmpeg:' + #13#10 + GetExceptionMessage + #13#10 + #13#10 +
-            'Clippycap will still install. You can install FFmpeg later from Settings > FFmpeg inside the app.',
-            mbInformation, MB_OK, IDOK);
-      end;
-    finally
-      DownloadPage.Hide;
-    end;
+    DownloadPage.Add('{#WebView2Url}', 'MicrosoftEdgeWebView2Setup.exe', '');
+    Queued := True;
   end;
+  if IsTaskSelected('ffmpeg') then
+  begin
+    DownloadPage.Add('{#FfmpegUrl}', 'ffmpeg.zip', '');     { empty hash = no verification (it's a moving "latest" build) }
+    Queued := True;
+  end;
+  if not Queued then exit;
+  DownloadPage.Show;
+  try
+    try
+      DownloadPage.Download;
+    except
+      if DownloadPage.AbortedByUser then
+        Result := False
+      else
+        SuppressibleMsgBox(
+          'A download failed:' + #13#10 + GetExceptionMessage + #13#10 + #13#10 +
+          'Clippycap will still install. The Edge WebView2 Runtime and FFmpeg can be installed later '
+          + '(WebView2 from Microsoft; FFmpeg from Settings > FFmpeg inside the app).',
+          mbInformation, MB_OK, IDOK);
+    end;
+  finally
+    DownloadPage.Hide;
+  end;
+end;
+
+procedure InstallWebView2;
+var
+  Setup: String;
+  ResultCode: Integer;
+begin
+  Setup := ExpandConstant('{tmp}\MicrosoftEdgeWebView2Setup.exe');
+  if not FileExists(Setup) then exit;
+  if not Exec(Setup, '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    SuppressibleMsgBox(
+      'The Microsoft Edge WebView2 Runtime could not be installed automatically. Clippycap will still '
+      + 'run (in a Chrome/Edge app-mode window) -- or install the Runtime yourself from Microsoft and reopen.',
+      mbInformation, MB_OK, IDOK);
 end;
 
 procedure ExtractFfmpeg;
@@ -160,6 +211,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if (CurStep = ssPostInstall) and IsTaskSelected('ffmpeg') then
-    ExtractFfmpeg;
+  if CurStep <> ssPostInstall then exit;
+  if IsTaskSelected('webview2') then InstallWebView2;
+  if IsTaskSelected('ffmpeg') then ExtractFfmpeg;
 end;
