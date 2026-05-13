@@ -168,8 +168,15 @@ def _run_pywebview_window(url: str, shell: ShellConfig, server: uvicorn.Server, 
         import webview  # noqa: PLC0415  -- the package is "pywebview"; the module is "webview"
     except ImportError:
         return False
+
+    api = _WindowApi()
+    # Track the window's size live: pywebview's `window.width` / `window.height` query the platform
+    # for the *current* size, which returns None for an already-destroyed window -- so reading them
+    # AFTER `webview.start()` returns raises ``cannot unpack non-iterable NoneType object`` and used
+    # to wrongly fall back to a Chrome --app window the moment the user closed our window.
+    last_size = [int(shell.window_width), int(shell.window_height)]
+
     try:
-        api = _WindowApi()
         window = webview.create_window(
             shell.window_title, html=_SPLASH_HTML, js_api=api,
             width=shell.window_width, height=shell.window_height, min_size=_WINDOW_MIN_SIZE,
@@ -179,17 +186,26 @@ def _run_pywebview_window(url: str, shell: ShellConfig, server: uvicorn.Server, 
             return False
         api._window = window                          # the only writer of this "private by convention" attr
 
+        def _on_resized(w: int, h: int) -> None:
+            last_size[0] = int(w)
+            last_size[1] = int(h)
+        window.events.resized += _on_resized
+
         def _go_live() -> None:                       # runs on a worker thread once the GUI loop is up
             _wait_until_started(server)
             window.load_url(url)
 
         webview.start(func=_go_live, gui="edgechromium")   # blocks until the window is closed
-        if shell.remember_window_state:
-            _persist_window_size(application, int(window.width), int(window.height))
-        return True
     except Exception as exc:
         _log.warning("pywebview window unavailable (%s); falling back to a browser window", exc)
         return False
+
+    # The window opened and closed cleanly. Persist its final size best-effort; even if THAT fails,
+    # the window's job is done -- don't fall back to a second window in the user's face.
+    if shell.remember_window_state:
+        with contextlib.suppress(Exception):
+            _persist_window_size(application, last_size[0], last_size[1])
+    return True
 
 
 def _open_app_window(url: str, shell: ShellConfig) -> bool:
