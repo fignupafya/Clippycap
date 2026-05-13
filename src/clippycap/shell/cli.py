@@ -138,14 +138,11 @@ def _persist_window_size(application: Application, width: int, height: int) -> N
 # off to Windows as if the user had clicked a native title bar -- DefWindowProc then enters its modal
 # move loop, which is what gives us Aero Snap (drag-to-edge → half-screen preview), the proper drag
 # cursor, and double-click-to-maximize. NB: resize uses a different mechanism (JS-driven, below),
-# because Windows' modal SIZE loop silently bails out on a window without ``WS_THICKFRAME``.
+# because Windows' modal SIZE loop silently bails out on a window without ``WS_THICKFRAME``, and
+# adding ``WS_THICKFRAME`` to a frameless WinForms form would paint a visible gray sizing border that
+# we'd then need a fragile ctypes WndProc subclass to hide via ``WM_NCCALCSIZE``.
 _WM_NCLBUTTONDOWN = 0x00A1
 _HTCAPTION = 2
-
-# Holds the ctypes-allocated SUBCLASSPROC trampolines for any windows we've subclassed so the GC
-# doesn't free them while Windows is still calling into them. (We only ever open one main window,
-# but a list keeps it generic.)
-_native_keepalive: list[Any] = []
 
 
 def _get_form(window: Any) -> Any | None:
@@ -160,131 +157,6 @@ def _get_form(window: Any) -> Any | None:
         return form if form is not None and not form.IsDisposed else None
     except Exception:
         return None
-
-
-def _enable_aero_snap(window: Any) -> None:                      # noqa: PLR0915 -- one Win32 setup, all of a piece
-    """Re-enable Windows' native Aero Snap (drag-to-edge → half-screen / quarter-screen snap previews,
-    Win+arrow shortcuts, Snap Assist) on a frameless pywebview window.
-
-    pywebview's ``frameless=True`` sets ``FormBorderStyle.None`` on the WinForms form, which strips
-    ``WS_THICKFRAME`` -- and that flag is what Windows' modal move loop (which our :meth:`_WindowApi.start_drag`
-    enters via ``WM_NCLBUTTONDOWN(HTCAPTION)``) looks for when deciding whether a window is snappable.
-    No flag → drag works, but no snap preview, no Win+arrow snap, no Snap Assist.
-
-    Adding ``WS_THICKFRAME`` back makes the OS draw a visible ~8px gray sizing border, which we hide
-    by subclassing the form's WndProc to return 0 from ``WM_NCCALCSIZE`` -- this tells Windows "the
-    entire window rect is client area, no non-client frame to draw". This is exactly the Aero
-    Borderless pattern Visual Studio / VS Code / Windows Terminal use for their custom title bars.
-
-    We attach via comctl32's ``SetWindowSubclass`` chain rather than overwriting ``GWL_WNDPROC``, so
-    WinForms' own WndProc is left intact and every message we don't care about flows through to it
-    unmodified."""
-    if sys.platform != "win32":
-        return
-    form = _get_form(window)
-    if form is None:
-        return
-    try:
-        import ctypes  # noqa: PLC0415
-        from ctypes import wintypes  # noqa: PLC0415
-
-        hwnd = wintypes.HWND(int(form.Handle.ToInt64()))
-        user32 = ctypes.windll.user32
-        comctl32 = ctypes.windll.comctl32
-
-        GWL_STYLE = -16
-        WS_THICKFRAME = 0x00040000        # OS draws a sizing border + considers us snap-eligible
-        WS_MAXIMIZEBOX = 0x00010000       # also required for Aero Snap to engage on drag
-
-        user32.GetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int)
-        user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
-        user32.SetWindowLongPtrW.argtypes = (wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t)
-        user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
-
-        cur_style = user32.GetWindowLongPtrW(hwnd, GWL_STYLE)
-        user32.SetWindowLongPtrW(hwnd, GWL_STYLE, cur_style | WS_THICKFRAME | WS_MAXIMIZEBOX)
-
-        # NCCALCSIZE_PARAMS.rgrc[0] -- the proposed window rect; we shrink it on the maximized state
-        # by the would-be frame thickness so a maximized borderless window doesn't bleed off-screen.
-        # And we override WM_GETMINMAXINFO to clamp the max size + position to the *work area* of
-        # the nearest monitor (not the full screen), so drag-to-top snap and Win+Up don't cover the
-        # taskbar -- WinForms' default for a frameless form is screen-bounds, which would.
-        WM_NCCALCSIZE = 0x0083
-        WM_GETMINMAXINFO = 0x0024
-        SM_CXSIZEFRAME, SM_CYSIZEFRAME, SM_CXPADDEDBORDER = 32, 33, 92
-        MONITOR_DEFAULTTONEAREST = 0x00000002
-
-        class _POINT(ctypes.Structure):
-            _fields_ = (("x", ctypes.c_long), ("y", ctypes.c_long))
-
-        class _RECT(ctypes.Structure):
-            _fields_ = (
-                ("left", ctypes.c_long), ("top", ctypes.c_long),
-                ("right", ctypes.c_long), ("bottom", ctypes.c_long),
-            )
-
-        class _MINMAXINFO(ctypes.Structure):
-            _fields_ = (
-                ("ptReserved", _POINT), ("ptMaxSize", _POINT), ("ptMaxPosition", _POINT),
-                ("ptMinTrackSize", _POINT), ("ptMaxTrackSize", _POINT),
-            )
-
-        class _MONITORINFO(ctypes.Structure):
-            _fields_ = (
-                ("cbSize", ctypes.c_ulong), ("rcMonitor", _RECT), ("rcWork", _RECT),
-                ("dwFlags", ctypes.c_ulong),
-            )
-
-        SUBCLASSPROC = ctypes.WINFUNCTYPE(
-            ctypes.c_ssize_t, wintypes.HWND, ctypes.c_uint,
-            ctypes.c_size_t, ctypes.c_ssize_t, ctypes.c_size_t, ctypes.c_size_t,
-        )
-        comctl32.DefSubclassProc.argtypes = (
-            wintypes.HWND, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t,
-        )
-        comctl32.DefSubclassProc.restype = ctypes.c_ssize_t
-        comctl32.SetWindowSubclass.argtypes = (
-            wintypes.HWND, SUBCLASSPROC, ctypes.c_size_t, ctypes.c_size_t,
-        )
-        comctl32.SetWindowSubclass.restype = wintypes.BOOL
-
-        def _proc(h: int, msg: int, wp: int, lp: int, sub_id: int, ref_data: int) -> int:
-            if msg == WM_NCCALCSIZE and wp:
-                if user32.IsZoomed(h):
-                    rect = ctypes.cast(lp, ctypes.POINTER(_RECT))[0]
-                    fx = user32.GetSystemMetrics(SM_CXSIZEFRAME) + user32.GetSystemMetrics(SM_CXPADDEDBORDER)
-                    fy = user32.GetSystemMetrics(SM_CYSIZEFRAME) + user32.GetSystemMetrics(SM_CXPADDEDBORDER)
-                    rect.left += fx
-                    rect.top += fy
-                    rect.right -= fx
-                    rect.bottom -= fy
-                return 0                  # whole window is client area -> NO visible frame
-            if msg == WM_GETMINMAXINFO:
-                monitor = user32.MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)
-                mi = _MONITORINFO()
-                mi.cbSize = ctypes.sizeof(_MONITORINFO)
-                user32.GetMonitorInfoW(monitor, ctypes.byref(mi))
-                mmi = ctypes.cast(lp, ctypes.POINTER(_MINMAXINFO))[0]
-                mmi.ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left
-                mmi.ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top
-                mmi.ptMaxSize.x = mi.rcWork.right - mi.rcWork.left
-                mmi.ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top
-                return 0
-            return int(comctl32.DefSubclassProc(h, msg, wp, lp))
-
-        sub_proc = SUBCLASSPROC(_proc)
-        comctl32.SetWindowSubclass(hwnd, sub_proc, 0xC11005A, 0)
-        _native_keepalive.append(sub_proc)            # keep the trampoline alive for the window's lifetime
-
-        # Trigger a fresh NCCALCSIZE -> the frame layout takes effect right now (no flicker on first drag).
-        SWP_FLAGS = 0x0020 | 0x0001 | 0x0002 | 0x0004 | 0x0010  # FRAMECHANGED|NOSIZE|NOMOVE|NOZORDER|NOACTIVATE
-        user32.SetWindowPos.argtypes = (
-            wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
-            ctypes.c_int, ctypes.c_int, ctypes.c_uint,
-        )
-        user32.SetWindowPos(hwnd, wintypes.HWND(0), 0, 0, 0, 0, SWP_FLAGS)
-    except Exception:
-        _log.exception("Aero Snap setup failed")
 
 
 class _WindowApi:
@@ -399,11 +271,6 @@ def _run_pywebview_window(url: str, shell: ShellConfig, server: uvicorn.Server, 
             last_size[0] = int(w)
             last_size[1] = int(h)
         window.events.resized += _on_resized
-
-        # Once the form exists, give Windows back the WS_THICKFRAME flag (hidden via NCCALCSIZE) so
-        # native Aero Snap kicks in on drag-to-edge / Win+arrow / Snap Assist -- pywebview's
-        # frameless mode otherwise strips that flag and Windows refuses to consider us snappable.
-        window.events.shown += lambda: _enable_aero_snap(window)
 
         def _go_live() -> None:                       # runs on a worker thread once the GUI loop is up
             _wait_until_started(server)
