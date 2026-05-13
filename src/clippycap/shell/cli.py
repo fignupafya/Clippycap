@@ -134,6 +134,32 @@ def _persist_window_size(application: Application, width: int, height: int) -> N
         })
 
 
+# Win32 hit-test codes for WM_NCLBUTTONDOWN (the "user just pressed a non-client area" message).
+# Sending one of these to our own HWND tells Windows: "treat the click as if it had landed on this
+# part of a native title bar / window frame" -- so Aero Snap, double-click-to-maximize, the gray
+# edge preview, and the proper resize cursors all start working on our otherwise-frameless window.
+_WM_NCLBUTTONDOWN = 0x00A1
+_HTCAPTION = 2
+_HT_RESIZE = {  # JS sends the int; we only forward if it's one of the eight resize directions
+    10: "HTLEFT", 11: "HTRIGHT", 12: "HTTOP", 13: "HTTOPLEFT", 14: "HTTOPRIGHT",
+    15: "HTBOTTOM", 16: "HTBOTTOMLEFT", 17: "HTBOTTOMRIGHT",
+}
+
+
+def _get_window_hwnd(window: Any) -> int | None:
+    """Best-effort lookup of the Win32 HWND for a pywebview ``Window``. Returns ``None`` off-Windows
+    or if the backend isn't WinForms / something's changed in pywebview's internals."""
+    if sys.platform != "win32" or window is None:
+        return None
+    try:
+        from webview.platforms.winforms import BrowserView  # noqa: PLC0415
+
+        form = BrowserView.instances.get(window.uid)
+        return int(form.Handle.ToInt64()) if form is not None else None
+    except Exception:
+        return None
+
+
 class _WindowApi:
     """Exposed to the renderer as ``window.pywebview.api`` -- the custom title bar's buttons call these.
     (``_window`` / ``_maximized`` start with ``_`` so pywebview doesn't expose them to the page.)"""
@@ -158,6 +184,33 @@ class _WindowApi:
     def close(self) -> None:
         if self._window is not None:
             self._window.destroy()
+
+    def start_drag(self) -> None:
+        """Hand the in-progress mouse-down off to Windows so it does NATIVE title-bar dragging --
+        this gives Aero Snap (drag-to-edge → half-screen preview), double-click-to-maximize, and the
+        proper drag cursor, none of which pywebview's JS-driven MoveWindow loop triggers."""
+        self._native_nclbuttondown(_HTCAPTION)
+
+    def start_resize(self, direction: int) -> None:
+        """Hand a mouse-down at a window edge off to Windows for NATIVE resize. ``direction`` is one
+        of the Win32 HT* hit-test codes for an edge / corner (10-17)."""
+        if int(direction) in _HT_RESIZE:
+            self._native_nclbuttondown(int(direction))
+
+    def _native_nclbuttondown(self, hit_test: int) -> None:
+        if sys.platform != "win32":
+            return
+        hwnd = _get_window_hwnd(self._window)
+        if hwnd is None:
+            return
+        try:
+            import ctypes  # noqa: PLC0415
+
+            user32 = ctypes.windll.user32
+            user32.ReleaseCapture()                       # WebView2 captured the mouse on mousedown -- let go first
+            user32.SendMessageW(hwnd, _WM_NCLBUTTONDOWN, hit_test, 0)
+        except Exception:
+            _log.exception("native NCLBUTTONDOWN dispatch failed")
 
 
 def _run_pywebview_window(url: str, shell: ShellConfig, server: uvicorn.Server, application: Application) -> bool:

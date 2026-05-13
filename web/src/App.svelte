@@ -180,6 +180,30 @@
     // `pywebviewready` event); when present, render our custom frameless-window title bar.
     if ((window as unknown as { pywebview?: unknown }).pywebview) nativeWindow = true;
     else window.addEventListener('pywebviewready', () => { nativeWindow = true; }, { once: true });
+
+    // Drag / resize via the OS, not pywebview's JS MoveWindow loop -- this is what makes Aero Snap
+    // (drag-to-edge -> half-screen preview), double-click-to-maximize, and the resize cursors all
+    // work on our otherwise-frameless window. Capture phase + stopImmediatePropagation pre-empts
+    // pywebview's own bubble-phase drag handler so we don't get both.
+    function onCaptureMouseDown(e: MouseEvent) {
+      if (e.button !== 0) return;
+      const api = (window as unknown as { pywebview?: { api?: { start_drag(): void; start_resize(dir: number): void } } }).pywebview?.api;
+      if (!api) return;                                    // browser / --app mode -- let it be
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const edge = target.closest('.resize-edge') as HTMLElement | null;
+      if (edge && edge.dataset.dir) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        api.start_resize(parseInt(edge.dataset.dir, 10));
+        return;
+      }
+      if (target.closest('.pywebview-drag-region')) {
+        e.preventDefault(); e.stopImmediatePropagation();
+        api.start_drag();
+      }
+    }
+    document.addEventListener('mousedown', onCaptureMouseDown, { capture: true });
+    // (no cleanup -- App.svelte is the root component, never unmounts during the app's lifetime)
     void loadTags(); void loadSources();
     void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
     void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
@@ -816,6 +840,21 @@
 </script>
 
 <svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} onpointerdown={onWindowPointerDown} onhashchange={syncFromHash} />
+
+{#if nativeWindow}
+  <!-- Invisible strips at each window edge / corner. The capture-phase mousedown handler turns a
+       click on one of these into a native WM_NCLBUTTONDOWN(HT…), so the OS handles the resize -- including
+       the proper cursors, the dotted preview, and Aero Snap. Hit-test codes: 12=top, 15=bottom, 10=left,
+       11=right, 13=top-left, 14=top-right, 16=bottom-left, 17=bottom-right. -->
+  <div class="resize-edge n"  data-dir="12"></div>
+  <div class="resize-edge s"  data-dir="15"></div>
+  <div class="resize-edge w"  data-dir="10"></div>
+  <div class="resize-edge e"  data-dir="11"></div>
+  <div class="resize-edge nw" data-dir="13"></div>
+  <div class="resize-edge ne" data-dir="14"></div>
+  <div class="resize-edge sw" data-dir="16"></div>
+  <div class="resize-edge se" data-dir="17"></div>
+{/if}
 
 <div class="app">
   <header class="topbar">
@@ -1532,4 +1571,17 @@
   .kbd-edit:hover { border-color: var(--accent); }
   .kbd-edit.capturing { background: var(--accent); color: #ffffff; border-color: var(--accent); }
   .mfoot { display: flex; align-items: center; padding: 10px 16px; border-top: 1px solid var(--border); gap: 8px; background: var(--bg-1); }
+  /* Invisible strips at the window's 4 edges + 4 corners; the capture-phase mousedown listener turns
+     a click on one of these into a native Win32 resize (via WM_NCLBUTTONDOWN). z-index very high so
+     they sit above the topbar / WindowControls; corners are 6 px so they take the *very corner* only
+     and don't eat clicks on the min/max/close buttons. */
+  .resize-edge { position: fixed; z-index: 9999; }
+  .resize-edge.n  { top: 0;    left: 6px; right: 6px;  height: 4px; cursor: ns-resize; }
+  .resize-edge.s  { bottom: 0; left: 6px; right: 6px;  height: 4px; cursor: ns-resize; }
+  .resize-edge.w  { top: 6px;  bottom: 6px; left: 0;   width: 4px;  cursor: ew-resize; }
+  .resize-edge.e  { top: 6px;  bottom: 6px; right: 0;  width: 4px;  cursor: ew-resize; }
+  .resize-edge.nw { top: 0;    left: 0;    width: 6px;  height: 6px; cursor: nwse-resize; }
+  .resize-edge.ne { top: 0;    right: 0;   width: 6px;  height: 6px; cursor: nesw-resize; }
+  .resize-edge.sw { bottom: 0; left: 0;    width: 6px;  height: 6px; cursor: nesw-resize; }
+  .resize-edge.se { bottom: 0; right: 0;   width: 6px;  height: 6px; cursor: nwse-resize; }
 </style>
