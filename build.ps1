@@ -69,10 +69,13 @@ if ($iscc) {
 }
 
 # collect the produced .exe files into the repo root, then drop the temporary build directories.
+# (Pre-delete the destination; Windows PowerShell 5.1's Move-Item -Force won't overwrite a file at
+# a directory destination -- it errors with "Cannot create a file that already exists".)
 $produced = @()
 foreach ($n in @("Clippycap-Portable.exe", "Clippycap-Setup.exe")) {
     if (Test-Path "dist\$n") {
-        Move-Item -Force "dist\$n" "."
+        if (Test-Path ".\$n") { Remove-Item -Force ".\$n" }
+        Move-Item "dist\$n" ".\$n"
         $produced += $n
     }
 }
