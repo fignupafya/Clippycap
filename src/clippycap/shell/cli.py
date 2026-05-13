@@ -134,28 +134,27 @@ def _persist_window_size(application: Application, width: int, height: int) -> N
         })
 
 
-# Win32 hit-test codes for WM_NCLBUTTONDOWN (the "user just pressed a non-client area" message).
-# Sending one of these to our own HWND tells Windows: "treat the click as if it had landed on this
-# part of a native title bar / window frame" -- so Aero Snap, double-click-to-maximize, the gray
-# edge preview, and the proper resize cursors all start working on our otherwise-frameless window.
+# Win32 hit-test code for WM_NCLBUTTONDOWN: we synthesize this with HTCAPTION to hand a mouse-down
+# off to Windows as if the user had clicked a native title bar -- DefWindowProc then enters its modal
+# move loop, which is what gives us Aero Snap (drag-to-edge → half-screen preview), the proper drag
+# cursor, and double-click-to-maximize. NB: resize uses a different mechanism (JS-driven, below),
+# because Windows' modal SIZE loop silently bails out on a window without ``WS_THICKFRAME``, and
+# adding ``WS_THICKFRAME`` to a frameless WinForms form would paint a visible gray sizing border that
+# we'd then need a fragile ctypes WndProc subclass to hide via ``WM_NCCALCSIZE``.
 _WM_NCLBUTTONDOWN = 0x00A1
 _HTCAPTION = 2
-_HT_RESIZE = {  # JS sends the int; we only forward if it's one of the eight resize directions
-    10: "HTLEFT", 11: "HTRIGHT", 12: "HTTOP", 13: "HTTOPLEFT", 14: "HTTOPRIGHT",
-    15: "HTBOTTOM", 16: "HTBOTTOMLEFT", 17: "HTBOTTOMRIGHT",
-}
 
 
-def _get_window_hwnd(window: Any) -> int | None:
-    """Best-effort lookup of the Win32 HWND for a pywebview ``Window``. Returns ``None`` off-Windows
-    or if the backend isn't WinForms / something's changed in pywebview's internals."""
+def _get_form(window: Any) -> Any | None:
+    """Best-effort lookup of the WinForms ``BrowserView`` form backing a pywebview ``Window``.
+    Returns ``None`` off-Windows or if pywebview's internals have changed."""
     if sys.platform != "win32" or window is None:
         return None
     try:
         from webview.platforms.winforms import BrowserView  # noqa: PLC0415
 
         form = BrowserView.instances.get(window.uid)
-        return int(form.Handle.ToInt64()) if form is not None else None
+        return form if form is not None and not form.IsDisposed else None
     except Exception:
         return None
 
@@ -188,29 +187,58 @@ class _WindowApi:
     def start_drag(self) -> None:
         """Hand the in-progress mouse-down off to Windows so it does NATIVE title-bar dragging --
         this gives Aero Snap (drag-to-edge → half-screen preview), double-click-to-maximize, and the
-        proper drag cursor, none of which pywebview's JS-driven MoveWindow loop triggers."""
-        self._native_nclbuttondown(_HTCAPTION)
+        proper drag cursor, none of which pywebview's JS-driven MoveWindow loop triggers.
 
-    def start_resize(self, direction: int) -> None:
-        """Hand a mouse-down at a window edge off to Windows for NATIVE resize. ``direction`` is one
-        of the Win32 HT* hit-test codes for an edge / corner (10-17)."""
-        if int(direction) in _HT_RESIZE:
-            self._native_nclbuttondown(int(direction))
-
-    def _native_nclbuttondown(self, hit_test: int) -> None:
-        if sys.platform != "win32":
-            return
-        hwnd = _get_window_hwnd(self._window)
-        if hwnd is None:
+        Why this is more involved than a single ``SendMessage``: WebView2 captured the mouse on its
+        own mousedown handler, on the form's UI thread. ``ReleaseCapture`` only affects the *calling*
+        thread, so calling it from pywebview's js_api worker thread is a silent no-op -- and then
+        Windows refuses to enter the modal move loop because the mouse is still captured elsewhere.
+        We marshal both calls onto the UI thread via ``Form.BeginInvoke`` (this is what Tauri does
+        on Windows for ``start_dragging`` for the same reason)."""
+        form = _get_form(self._window)
+        if form is None:
             return
         try:
             import ctypes  # noqa: PLC0415
 
-            user32 = ctypes.windll.user32
-            user32.ReleaseCapture()                       # WebView2 captured the mouse on mousedown -- let go first
-            user32.SendMessageW(hwnd, _WM_NCLBUTTONDOWN, hit_test, 0)
+            from System import Action  # type: ignore[import-not-found]  # noqa: PLC0415 -- pythonnet
+
+            hwnd = int(form.Handle.ToInt64())
+
+            def _on_ui_thread() -> None:
+                user32 = ctypes.windll.user32
+                user32.ReleaseCapture()
+                user32.SendMessageW(hwnd, _WM_NCLBUTTONDOWN, _HTCAPTION, 0)
+
+            form.BeginInvoke(Action(_on_ui_thread))
         except Exception:
-            _log.exception("native NCLBUTTONDOWN dispatch failed")
+            _log.exception("start_drag dispatch failed")
+
+    def get_window_bounds(self) -> list[int]:
+        """Return the current ``[left, top, width, height]`` of the form, in screen pixels.
+        Used by the JS-driven resize loop to compute the new bounds from mouse-move deltas."""
+        form = _get_form(self._window)
+        if form is None:
+            return [0, 0, 0, 0]
+        return [int(form.Left), int(form.Top), int(form.Width), int(form.Height)]
+
+    def set_window_bounds(self, left: int, top: int, width: int, height: int) -> None:
+        """Set the form's outer ``[left, top, width, height]`` (screen pixels). Marshalled to the
+        form's UI thread -- ``Form.SetBounds`` from any other thread races with WinForms' layout."""
+        form = _get_form(self._window)
+        if form is None:
+            return
+        try:
+            from System import Action  # type: ignore[import-not-found]  # noqa: PLC0415 -- pythonnet
+
+            x, y, w, h = int(left), int(top), int(width), int(height)
+
+            def _on_ui_thread() -> None:
+                form.SetBounds(x, y, w, h)
+
+            form.BeginInvoke(Action(_on_ui_thread))
+        except Exception:
+            _log.exception("set_window_bounds dispatch failed")
 
 
 def _run_pywebview_window(url: str, shell: ShellConfig, server: uvicorn.Server, application: Application) -> bool:
