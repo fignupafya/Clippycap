@@ -1,103 +1,90 @@
 # Clippycap
 
-A local, single-user, **extensible media library + annotation tool**. First use case: organising and
-reviewing gameplay clips for self-improvement — find kills/mistakes, take notes (general + pinned to a
-moment in the video), cross-reference clips, filter by your own tags. "video" is just the first
-*media type plugin*; the core (assets, tags, notes, references, search) is media-type-agnostic, so
-images / audio / `.dem` files / … can be added later without rewriting it.
+**A local desktop app for organising your own video recordings — tag clips, write notes pinned to exact moments, and cross-reference one clip from another.** Built originally for reviewing gameplay recordings (catching kills, mistakes, moments worth showing someone), with a media-type-agnostic engine underneath so audio, replay files, screenshots, or anything else can plug in later without touching the core.
 
-Files are identified by their **content hash**, not their path — so renaming or moving a clip (even
-across drives) never loses its tags or notes; a file that disappears is marked *missing*, not
-deleted, and is restored automatically when it reappears.
+![Clippycap — library view](docs/screenshots/library.png)
 
-The app opens as a **real frameless desktop window** (WebView2 via [pywebview]) with our own HTML
-title bar — minimize / maximize / close, drag the brand or the empty strip — so it feels like a
-native app, not a browser tab. If WebView2 is missing it falls back to a chromeless Chrome/Edge
-`--app` window, then a normal browser tab.
+## Download
 
-[pywebview]: https://pywebview.flowrl.com/
+Pick one — both are standalone Windows builds, no Python or other dependencies to install:
 
-## Distribution
+| | |
+|---|---|
+| **[Clippycap-Setup.exe](https://github.com/fignupafya/Clippycap/releases/latest/download/Clippycap-Setup.exe)** (~104 MB) | Windows installer. Bundles FFmpeg so it works fully offline out of the box. Per-user install (no admin / UAC), Start-menu shortcut, uninstaller. Offers to install the Edge WebView2 runtime if it's missing. |
+| **[Clippycap-Portable.exe](https://github.com/fignupafya/Clippycap/releases/latest/download/Clippycap-Portable.exe)** (~20 MB) | One self-contained `.exe`. Nothing to install — just download and run. FFmpeg isn't bundled (the app offers to download it on first run, or you can decline and use the client-side fallback). |
 
-Two single-file deliverables for Windows; everything you need is in one of them:
+All releases: **[github.com/fignupafya/Clippycap/releases](https://github.com/fignupafya/Clippycap/releases)**.
 
-- **`Clippycap-Portable.exe`** (~20 MB) — one self-contained executable. Nothing to install, just run
-  it. The first time, it offers to download a static FFmpeg build (~390 MB) into
-  `%APPDATA%\Clippycap\bin\`; you can decline (the app still works with client-side thumbnails) and
-  install it later from **Settings → FFmpeg**.
-- **`Clippycap-Setup.exe`** (~104 MB) — a Windows installer (Inno Setup; per-user, no UAC). Bundles
-  FFmpeg so the installed app works fully out of the box, offline; offers to install the Edge WebView2
-  Runtime if it's missing. Adds a Start-menu shortcut and an uninstaller. Ships
-  `THIRD_PARTY_NOTICES.txt` with the GPL attribution for FFmpeg.
+User data — the SQLite library, thumbnails, tag images, logs, `local.toml` — always lives at `%APPDATA%\Clippycap\` and is shared between the two builds. The uninstaller never touches it; it's your data.
 
-User data (the SQLite library, thumbnails, tag images, logs, `local.toml`) always lives in
-`%APPDATA%\Clippycap\` — shared by both builds, survives reinstalls.
+## What it does
 
-## Build it yourself
+- **Add a folder, scan, and your clips appear.** No managed library: Clippycap walks the folders you point it at, hashes each file, and stores everything keyed by content. Move, rename, or reorganise files however you want — Clippycap finds them again by hash and keeps every tag, note, and cross-reference intact. A missing file is marked *missing*, never deleted, and is restored the moment it reappears.
+- **Flat, user-defined tags.** A tag is a name, a colour, and either an emoji icon or an uploaded image. No nested hierarchies, no presets. Filter the library by any combination.
+- **General notes plus notes pinned to a moment in the video.** Each clip carries a free-form write-up *and* a timeline of timestamped notes. The detail view shows them as markers on the playhead bar; clicking a note seeks the player, dragging it retimes the note.
+- **Cross-reference clips.** Type `@another-clip` in any note and Clippycap links them automatically. You can also reference a specific *moment* of another clip — useful for "the kill that set up the play I'm reviewing here." The detail view shows incoming and outgoing references in dedicated panels.
+- **Fast full-text search.** SQLite + FTS5 over titles, notes, and tag names. Saved views remember filter combinations you re-open often.
+- **A built-in rich player.** Frame-step, variable speed, IN/OUT trim handles on the timeline, draggable note markers. Optional FFmpeg-backed edit operations (trim, export, …) when FFmpeg is available.
+- **A real desktop window, not a browser tab.** Frameless WebView2 window with the app's own HTML title bar (logo, global search, drag region, custom min / max / close). Falls back to a chromeless Chrome/Edge `--app` window, then a normal browser tab, if WebView2 is absent.
+
+![A clip's detail view](docs/screenshots/clip.png)
+
+*A clip's detail view — media player with frame-step + IN/OUT trim, the timeline carrying every timestamped note for this clip, the cross-reference panel (incoming and outgoing), per-clip tags, and the edit controls.*
+
+## Quick start
+
+1. Download `Clippycap-Setup.exe` (above) and run it.
+2. Open Clippycap → **Settings → Sources** → add a folder of videos.
+3. Click **Scan**. Clippycap hashes and indexes everything in the background.
+4. Click any clip to open the detail view; add tags, write notes, link to other clips.
+
+## Architecture (one-paragraph version)
+
+Layered / hexagonal: a pure `core/` (entities, value objects, ports — no I/O), a thin `app/` (use-case services), `infra/` (SQLite, FFmpeg adapters, the scanner, identity strategies), an `api/` (FastAPI, which also serves the prebuilt SPA), and `web/` (Svelte 5 + Vite + TypeScript). New media types and features land in `plugins/` and `media_types/` — the core never branches on file extension. Files are identified by **BLAKE3 content hash** with a `(path, size, mtime)` cache so rescans are fast. Configuration is *data*: `config/default.toml` is the single source of all defaults, layered with a per-user `local.toml`; a missing key is a hard error, never a silent fallback. FFmpeg / FFprobe are held through a *mutable* `FfmpegToolsHolder` so installs and path changes take effect with no restart. Full design and the decision log in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+
+**Stack:** Python 3.13 · FastAPI · SQLite (FTS5) · pywebview + WebView2 · Svelte 5 + Vite + TypeScript · FFmpeg / FFprobe. (Python 3.13 not 3.14 because pywebview's `pythonnet` dep has no 3.14 wheels yet; nothing in the code is 3.14-specific.)
+
+## Build from source
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-That's the recipe — `build.ps1` (at the repo root) builds the web UI, runs PyInstaller (portable
-`.exe` + one-folder build), runs Inno Setup if it's installed (and first downloads FFmpeg into
-`bin\` for the installer to bundle), then moves the two `.exe` files into the repo root and removes
-the temporary `dist\` / `build\`. After it finishes the root holds exactly `build.ps1` +
-`Clippycap-Portable.exe` + `Clippycap-Setup.exe` (plus the source folders). Details and knobs in
-[`packaging/README.md`](./packaging/README.md).
+`build.ps1` (at the repo root) builds the web UI, runs PyInstaller (one-file portable + a one-folder build), downloads a standalone FFmpeg into `bin\` if Inno Setup is installed, runs Inno Setup to produce the installer, then moves the two `.exe` files into the repo root and removes the temporary `dist\` / `build\`. Prerequisites: Python 3.13 with a `.venv` at the repo root, Node.js + npm, and — only for the installer — [Inno Setup 6](https://jrsoftware.org/isdl.php). Details and knobs in [`packaging/README.md`](./packaging/README.md).
 
-## Architecture
+## Development
 
-See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full design — the layered/hexagonal structure
-(`core` → `app` → `infra` → `api` → `web`, plus a plugin layer), the extension points, the
-scan/identity flows, the SQLite schema, packaging, the **decision log** (§14), and the **roadmap**
-(§15).
-
-Stack: **Python 3.13** + FastAPI (which also serves the built frontend); SQLite + FTS5;
-[pywebview] / WebView2 for the window; Svelte 5 + Vite + TypeScript for the UI; ffmpeg/ffprobe via a
-`FfmpegToolsHolder` so installs/path-changes take effect with no restart. (3.13 rather than 3.14
-because pywebview's `pythonnet` dep has no 3.14 wheel yet; nothing in the code is 3.14-specific.)
-
-## Set up (development)
-
-```bat
+```powershell
 py -3.13 -m venv .venv
-.venv\Scripts\python -m pip install -e ".[dev,window]"   :: backend + tests/lint + pywebview
-npm --prefix web install                                  :: frontend deps (once)
-npm --prefix web run build                                :: emits web/dist/, the backend serves it at "/"
+.venv\Scripts\python -m pip install -e ".[dev,window]"   # backend + tests/lint + pywebview
+npm --prefix web install                                  # frontend deps (once)
+npm --prefix web run build                                # emits web/dist/, the backend serves it at "/"
 ```
 
-## Run
+Run the app: `.venv\Scripts\python -m clippycap` (opens the desktop window). Or double-click [`Clippycap.bat`](./Clippycap.bat). The interactive API docs live at `/docs` once the server is up.
 
-```bat
-.venv\Scripts\python -m clippycap add-source "D:\path\to\your\clips"   :: register a folder to watch
-.venv\Scripts\python -m clippycap scan                                 :: discover + hash media
-.venv\Scripts\python -m clippycap                                      :: open the app window
+CLI flows:
+
+```powershell
+.venv\Scripts\python -m clippycap add-source "D:\path\to\clips"
+.venv\Scripts\python -m clippycap scan
+.venv\Scripts\python -m clippycap run --browser     # use the default browser instead of the native window
 ```
 
-Or just double-click **`Clippycap.bat`** in this folder. The interactive API lives at `/docs`.
+Frontend dev loop with hot reload: in one terminal `set CLIPPYCAP__SERVER__PORT=8765 && .venv\Scripts\python -m clippycap run --no-browser`; in another `npm --prefix web run dev` — Vite proxies `/api`, `/media`, `/thumbnails` to the backend.
 
-Frontend dev loop: in one terminal `set CLIPPYCAP__SERVER__PORT=8765 && .venv\Scripts\python -m clippycap run --no-browser`,
-in another `npm --prefix web run dev` (Vite proxies `/api`, `/media`, `/thumbnails` to the backend).
+Quality gates:
 
-## Quality gates
-
-```bat
+```powershell
 .venv\Scripts\python -m pytest -q
 .venv\Scripts\python -m ruff check src tests
 .venv\Scripts\python -m mypy src/clippycap
 ```
 
-## Status
+65 pytest tests pass; ruff + mypy `--strict` clean.
 
-End-to-end working: backend (config, domain core, plugin runtime, SQLite layer, scanner, ffmpeg
-media layer with on-demand install, the `video` media type, all application services, the FastAPI
-HTTP layer, the CLI / pywebview launcher), a full Svelte UI (the [mockup] is mostly live — rich
-player, timeline with draggable IN/OUT and note markers, Tag Manager with image uploads, references
-panel with @-mentions of clips and moments, saved views, Settings + FFmpeg tab, in-app
-dialogs/toasts, hash-based URL routing), and a reproducible build → `Clippycap-Portable.exe` +
-`Clippycap-Setup.exe` at the repo root. 65 pytest tests pass; ruff + mypy `--strict` clean. Open
-items live in `ARCHITECTURE.md` §15 — mainly: JSON export/import, a sample plugin, splitting the
-big `App.svelte`, more test coverage for the new flows.
+## License
 
-[mockup]: ../Yakalamalar/yakalamalar-ui-preview.html
+MIT — see [`LICENSE`](./LICENSE). Use it freely; the copyright notice has to travel with the source.
+
+FFmpeg attribution (when bundled in the installer): see [`THIRD_PARTY_NOTICES.txt`](./THIRD_PARTY_NOTICES.txt).
