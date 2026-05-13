@@ -4,11 +4,11 @@ Two deliverables, both single `.exe` files (a user only needs the `.exe`, nothin
 
 | File | What it is |
 |------|------------|
-| **`Clippycap-Portable.exe`** | One self-contained executable (PyInstaller one-file). Nothing to install -- download and double-click. Unpacks to a temp dir on each launch, so the first start is a touch slower than the installed build. |
-| **`Clippycap-Setup.exe`** | A Windows installer (Inno Setup) wrapping the one-folder build. Adds a Start-menu (and optional desktop) shortcut and an uninstaller. During setup, if FFmpeg isn't already on the machine, it offers to download it. |
+| **`Clippycap-Portable.exe`** (~20 MB) | One self-contained executable (PyInstaller one-file). Nothing to install -- download and double-click. Unpacks to a temp dir on each launch (~1 s). FFmpeg is *not* bundled; the app offers (once) to download a static build on first run, or you can install it later from **Settings → FFmpeg**. |
+| **`Clippycap-Setup.exe`** (~104 MB) | A Windows installer (Inno Setup; per-user, no UAC) wrapping the one-folder PyInstaller build. **Bundles FFmpeg** (~390 MB on disk after install) so the installed app works fully out of the box, offline. Adds a Start-menu (and optional desktop) shortcut and an uninstaller. Offers to install the Edge WebView2 Runtime if it's missing. Ships `THIRD_PARTY_NOTICES.txt` (GPL attribution for ffmpeg). |
 
 This folder (`packaging/`) holds the *internals* of the build -- the PyInstaller spec, the Inno Setup
-script, the on-demand-ffmpeg helper, the app icon. The one entry-point script lives at the **repo root**:
+script, the ffmpeg-fetch helper, the app icon. The one entry-point script lives at the **repo root**:
 **`build.ps1`**.
 
 ## Build it yourself
@@ -19,45 +19,54 @@ powershell -ExecutionPolicy Bypass -File build.ps1
 
 That's the whole recipe -- run it and you get the same `.exe` files that ship in a release, so you never have to trust a prebuilt binary. It:
 
-1. builds the web UI (`npm --prefix web run build` -> `web/dist/`),
-2. installs PyInstaller into the active environment if needed,
-3. runs `pyinstaller --noconfirm packaging\clippycap.spec`, which produces a one-file exe and a one-folder build (`Clippycap.exe` + `_internal\`) under a temporary `dist\`,
-4. if [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed (it looks for `iscc.exe` on `PATH` and under `Program Files`), runs `iscc packaging\installer.iss` to wrap the one-folder build into an installer. If Inno Setup isn't installed it just skips this step with a warning -- the portable `.exe` is still built.
+1. builds the web UI (`npm --prefix web run build` → `web/dist/`),
+2. installs PyInstaller + pywebview into the active environment if needed,
+3. runs `pyinstaller --noconfirm packaging\clippycap.spec`, producing a one-file `.exe` and a one-folder build under a temporary `dist\`,
+4. if [Inno Setup 6](https://jrsoftware.org/isdl.php) is installed (it looks for `iscc.exe` on `PATH`, under `Program Files`, and under `%LocalAppData%\Programs\`):
+   a. runs `packaging\get_ffmpeg.ps1` to drop a standalone `ffmpeg.exe` + `ffprobe.exe` into `<repo>\bin\` (skip-if-present; ~80 MB download, once), so the installer can bundle them,
+   b. runs `iscc packaging\installer.iss` to wrap the one-folder build + ffmpeg + `THIRD_PARTY_NOTICES.txt` into `Clippycap-Setup.exe`. If Inno Setup isn't installed, this step is skipped with a warning -- the portable `.exe` is still built.
 5. **moves `Clippycap-Portable.exe` (and `Clippycap-Setup.exe`, if it was built) into the repo root, then deletes the temporary `dist\` and `build\` directories.**
 
 So after a run, the repo root holds exactly `build.ps1` + `Clippycap-Portable.exe` + `Clippycap-Setup.exe` (plus the source folders) -- nothing else. The two `.exe`s are git-ignored, never committed.
 
-Prerequisites: **Python 3.13** with the project + its dependencies installed (a `.venv` at the repo root is used if present, otherwise the `python` on `PATH`) -- the desktop window uses [pywebview](https://pywebview.flowrl.com/), whose `pythonnet` dependency has no Python 3.14 wheels yet; on 3.14 the app still runs but falls back to a Chrome/Edge `--app` window. Plus Node.js + npm, and -- only for the installer -- Inno Setup 6. **FFmpeg is *not* needed to build** (it isn't bundled; see below).
+Prerequisites: **Python 3.13** with the project + its `[window]` extra (pywebview) installed in a `.venv` at the repo root (`pip install -e ".[dev,window,build]"`), Node.js + npm, and -- only for the installer -- Inno Setup 6. *Building the installer needs internet the first time* (to fetch ffmpeg into `bin\`); subsequent runs reuse it. The portable-only build (no Inno) doesn't need internet or ffmpeg at build time.
 
-You can also run the steps by hand: `npm --prefix web run build`, then `pyinstaller --noconfirm packaging\clippycap.spec`, then (optionally) `iscc packaging\installer.iss`. `clippycap.spec` and `installer.iss` are both plain text and fully auditable.
+(Python 3.13 not 3.14: pywebview's `pythonnet` dep has no 3.14 wheels yet. Nothing in the code is 3.14-specific; on 3.14 everything else works, the pywebview window just falls back to a Chrome/Edge `--app` window.)
 
-## What's bundled (and what isn't)
+You can also run the steps by hand: `npm --prefix web run build`, `pyinstaller --noconfirm packaging\clippycap.spec`, `powershell packaging\get_ffmpeg.ps1`, `iscc packaging\installer.iss`. `clippycap.spec`, `installer.iss`, and the two `.ps1` scripts are plain text and fully auditable.
 
-Bundled into the executables: the `clippycap` Python package, the Python runtime, the dependencies (FastAPI / uvicorn / pydantic / blake3 / tomli_w / pywebview), `config/default.toml`, and `web/dist/` (the built SPA -- without it the backend serves a placeholder page).
+## What's where at runtime
 
-**Not bundled: FFmpeg / ffprobe.** They're large (~150 MB of DLLs) and licence-encumbered, so instead the app fetches a small static build *on demand*:
-
-- On first launch, if ffmpeg isn't found, Clippycap offers to download it. Decline and it never re-asks; you can still install it later from **Settings -> FFmpeg** (which also lets you point the app at an ffmpeg you installed yourself, anywhere).
-- `Clippycap-Setup.exe` offers the same download as a ticked task on the "Select Additional Tasks" page.
-
-In every case the downloaded `ffmpeg.exe` / `ffprobe.exe` go to `%APPDATA%\Clippycap\bin\` -- which is the first place the app's `"auto"` detection looks (it then checks the bundle dir, next to the exe, common install locations, and finally `PATH`).
-
-## Where things live at runtime
-
-- **Code / web UI / `default.toml`**: inside the bundle. When frozen, `default_install_dir()` resolves to PyInstaller's bundled-data dir (`sys._MEIPASS` -- a temp dir for the one-file build, the `_internal\` folder for the one-folder build).
-- **User data**: `%APPDATA%\Clippycap\` -- the SQLite library, `local.toml`, thumbnails, tag images, the on-demand ffmpeg (`bin\`), plugins, and logs. This is shared by both builds and survives reinstalls/updates. (The installer's uninstaller leaves this folder alone -- it's your data.)
+- **The portable `.exe`'s code / web UI / `default.toml`**: inside the bundle (PyInstaller one-file unpacks to `sys._MEIPASS` -- a temp dir -- each launch).
+- **The installed app**: at `{app}` (= `%LocalAppData%\Programs\Clippycap\` by default, since the installer is per-user). The PyInstaller one-folder payload lives in `{app}\_internal\`, ffmpeg in `{app}\bin\`, the launcher `{app}\Clippycap.exe`.
+- **User data** (shared by both builds, survives reinstalls): `%APPDATA%\Clippycap\` -- the SQLite library, `local.toml`, thumbnails, tag images, the on-demand-installed ffmpeg (`bin\`), plugins, logs. The installer's uninstaller leaves this folder alone -- it's your data.
 - **Logs / console output**: the `.exe` is built **windowed** (no console window); stdout/stderr (including any crash) go to `%APPDATA%\Clippycap\logs\clippycap.log`. For a console window while debugging, set `console=True` in `clippycap.spec` and rebuild.
+
+## How the app finds ffmpeg
+
+The resolver's `"auto"` mode (in `infra/media/ffmpeg.py`) probes, in order:
+
+1. `<data_dir>/bin/` — where the *portable*'s on-demand install lands (`%APPDATA%\Clippycap\bin\`).
+2. `<install_dir>/bin/` — the bundle's bin dir (used in dev: `<repo>/bin/`).
+3. `<exe_dir>/bin/` (when frozen) — **where the installer puts the bundled ffmpeg** (`{app}\bin\`).
+4. Common Windows install locations (`C:\ffmpeg\bin`, choco, scoop, winget links, ...).
+5. `PATH`.
+
+So an installed app finds the bundled ffmpeg in (3); a portable app that downloaded ffmpeg finds it in (1); a dev finds the `bin\` they populated by hand or via `get_ffmpeg.ps1` in (2); and someone with ffmpeg elsewhere can either set the path explicitly in **Settings → FFmpeg** (which goes into `local.toml` and wins over `"auto"`) or just rely on (4)/(5).
 
 ## Files in here
 
-- `clippycap.spec` -- PyInstaller spec. One analysis -> `Clippycap-Portable.exe` (one-file) **and** a one-folder build (for the installer). Bundles `config/default.toml` + `web/dist/`; **not** ffmpeg. Uses `packaging/clippycap.ico` for the exe/window icon if present.
+- `clippycap.spec` -- PyInstaller spec. One Analysis → `Clippycap-Portable.exe` (one-file) **and** a one-folder build (for the installer). Bundles `config/default.toml` + `web/dist/`; **not** ffmpeg (the installer adds it separately). Uses `packaging/clippycap.ico` for the exe/window icon.
 - `clippycap_entry.py` -- the PyInstaller entry point (just calls `clippycap.shell.cli.main`).
-- `installer.iss` -- Inno Setup 6 script: per-user install, Start-menu (and optional desktop) shortcut, uninstaller, an icon, and an optional "download FFmpeg" task. Outputs `Clippycap-Setup.exe`.
-- `clippycap.ico` -- the app icon (exe, window, installer).
-- `get_ffmpeg.ps1` -- dev helper: drops a static ffmpeg/ffprobe into `<repo>/bin/` (the packaged app downloads it on demand instead).
+- `installer.iss` -- Inno Setup 6 script: per-user install, Start-menu + optional desktop shortcut, uninstaller, icon. Bundles `ffmpeg.exe`+`ffprobe.exe` from `<repo>\bin\` → `{app}\bin\`, and `THIRD_PARTY_NOTICES.txt`. Optional ticked task: install the Edge WebView2 Runtime if it's missing (downloads Microsoft's Evergreen Bootstrapper). Outputs `Clippycap-Setup.exe`.
+- `clippycap.ico` -- the app icon (exe + window + installer).
+- `get_ffmpeg.ps1` -- downloads BtbN's static GPL win64 ffmpeg build → `<repo>\bin\` (skip-if-present; cleans up stray "shared"-build DLLs). Called by `build.ps1` before iscc; also handy for dev.
 
 ## Knobs
 
 - **App icon**: `packaging/clippycap.ico` -- used by `clippycap.spec` (exe + window) and `installer.iss` (`SetupIconFile`). Replace it to rebrand.
 - **Missing import at runtime** (an `ImportError` when the `.exe` runs): add the module name to `hiddenimports` in `clippycap.spec`.
-- The one-file build is bigger and slower to start than the one-folder one (it has to unpack itself each time). If you only want the installer, drop the `EXE(... name="Clippycap-Portable" ...)` block from `clippycap.spec`; if you only want the portable `.exe`, drop the `COLLECT(...)` line and don't run `iscc`.
+- **Console build for debugging**: set `console=True` in `clippycap.spec`.
+- **Just the portable, no installer**: drop the `COLLECT(...)` line from `clippycap.spec`; build.ps1 will skip iscc.
+- **Just the installer, no portable**: drop the second `EXE(... name="Clippycap-Portable" ...)` block from `clippycap.spec`.
+- **Smaller installer (no ffmpeg)**: remove the two `Source: "..\bin\ffmpeg*"` lines from `installer.iss` and add back a "Download FFmpeg" task in `[Tasks]` + the matching `[Code]` (see the git history of `installer.iss` for the old version). Installer drops to ~18 MB; users get the same first-run prompt as the portable.
