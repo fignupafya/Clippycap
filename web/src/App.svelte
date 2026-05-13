@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { api } from './lib/api';
   import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
-  import TitleBar from './lib/TitleBar.svelte';
+  import WindowControls from './lib/WindowControls.svelte';
   import logoUrl from './assets/clippycap-logo.png';
 
   type Quick = 'all' | 'untagged' | 'new';
@@ -817,11 +817,12 @@
 
 <svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} onpointerdown={onWindowPointerDown} onhashchange={syncFromHash} />
 
-{#if nativeWindow}<TitleBar />{/if}
-
 <div class="app">
-  <header>
-    <div class="brand"><span class="logo">C</span> Clippycap</div>
+  <header class="topbar">
+    <div class="brand pywebview-drag-region">
+      <img src={logoUrl} class="logo" alt="" draggable="false" />
+      <span class="brand-name">Clippycap</span>
+    </div>
     <input class="field search" placeholder="Search clips & notes — press Enter" bind:value={searchText}
            onkeydown={(e) => { if (e.key === 'Enter') appliedText = searchText; }} />
     <select class="field sort" bind:value={sort}>
@@ -831,9 +832,11 @@
       <option value="duration_desc">Duration</option>
       <option value="title_asc">Title</option>
     </select>
+    <div class="topbar-fill pywebview-drag-region"></div>
     <button class="btn sm" onclick={scanAll}>{scanJob ? `Scanning… ${scanJob.scanned}` : 'Scan'}</button>
     <button class="btn sm" onclick={() => (showTags = true)}>Tags</button>
     <button class="btn sm" onclick={openSettings} disabled={!cfg} title="Settings">⚙ Settings</button>
+    {#if nativeWindow}<WindowControls />{/if}
   </header>
 
   <div class="body">
@@ -1337,12 +1340,12 @@
 {/if}
 
 <style>
-  /* the body's #app holds the (optional) frameless-window title bar + the app, stacked */
-  :global(#app) { display: flex; flex-direction: column; }
-  .app { display: flex; flex-direction: column; flex: 1; min-height: 0; }
-  header { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 50px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
-  .brand { font-weight: 800; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-  .logo { width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg, var(--accent), #9a3412); color: #1a0e07; display: grid; place-items: center; font-weight: 900; }
+  .app { display: flex; flex-direction: column; height: 100%; }
+  header.topbar { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 50px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
+  .brand { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+  .brand-name { font-weight: 800; }
+  .logo { width: 22px; height: 22px; object-fit: contain; flex: none; }
+  .topbar-fill { flex: 1; min-width: 12px; align-self: stretch; }
   .search { flex: 1; max-width: 460px; border-radius: 999px; }
   .sort { width: auto; }
   .body { flex: 1; display: flex; min-height: 0; }

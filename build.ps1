@@ -13,8 +13,10 @@
 #     else the `python` on PATH).  [The desktop window uses pywebview, whose pythonnet dep has no
 #     Python 3.14 wheels yet -- on 3.14 the app still works but falls back to a Chrome/Edge --app window.]
 #   - Node.js + npm.
-#   - Optional: Inno Setup 6 (https://jrsoftware.org/isdl.php) to also build the installer.
-# FFmpeg is NOT bundled -- the app downloads it on demand -- so you don't need it to build.
+#   - Optional: Inno Setup 6 (https://jrsoftware.org/isdl.php) to also build the installer. When it's
+#     present, this script first fetches a standalone ffmpeg/ffprobe into bin\ (once) so the installer
+#     bundles them; the *portable* .exe never bundles ffmpeg -- it downloads it on demand. Building
+#     the installer therefore needs internet (once); building only the portable .exe doesn't.
 
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot          # this script lives at the repo root
@@ -53,6 +55,10 @@ if (-not $iscc) {
     }
 }
 if ($iscc) {
+    Invoke-Step "ensuring a standalone ffmpeg is in bin\ (the installer bundles it)" {
+        & "$PSScriptRoot\packaging\get_ffmpeg.ps1"
+        Set-Location $PSScriptRoot   # get_ffmpeg.ps1 changes the location; put it back
+    }
     Invoke-Step "building the Windows installer (Inno Setup)" {
         & $iscc /Qp packaging\installer.iss
     }

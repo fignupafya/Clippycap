@@ -1,0 +1,40 @@
+Clippycap -- third-party components
+===================================
+
+Clippycap itself is licensed under the PolyForm Noncommercial License 1.0.0 (see LICENSE / README).
+
+It uses several third-party components. The two that carry notable obligations are listed in full
+below; the rest (FastAPI, Starlette, uvicorn, Pydantic, blake3, tomli_w, pywebview, pythonnet, Svelte,
+Vite, ...) are under permissive MIT / BSD / Apache-2.0 licenses -- see each project for its license text.
+
+
+FFmpeg  (ffmpeg.exe, ffprobe.exe)
+---------------------------------
+Clippycap uses FFmpeg -- specifically the static Windows x64 "GPL" build published by BtbN at
+https://github.com/BtbN/FFmpeg-Builds . The installer bundles `ffmpeg.exe` and `ffprobe.exe` from
+that build into `<install dir>\bin\`; the portable build does not bundle them but downloads the same
+build on demand into `%APPDATA%\Clippycap\bin\`.
+
+That build includes components (e.g. x264, x265) licensed under the GNU General Public License, so
+the FFmpeg executables are covered by the GPL (version 3 or later -- see
+https://www.gnu.org/licenses/gpl-3.0.txt ).
+
+Clippycap invokes `ffmpeg` / `ffprobe` as separate command-line programs -- it does not link against
+them -- so Clippycap's own PolyForm-Noncommercial licensing is unaffected (this is "mere aggregation" under the GPL).
+
+The complete corresponding source code for the bundled FFmpeg, and the configuration / build scripts
+used to produce it, are available from:
+  - https://github.com/BtbN/FFmpeg-Builds                      (the build configuration)
+  - https://git.ffmpeg.org/ffmpeg.git  /  https://github.com/FFmpeg/FFmpeg   (FFmpeg)
+  - https://code.videolan.org/videolan/x264                    (x264)
+  - https://bitbucket.org/multicoreware/x265_git               (x265)
+  - ... and the other libraries FFmpeg is built against, per the BtbN build configuration.
+
+
+Microsoft Edge WebView2 Runtime
+-------------------------------
+Clippycap's window is rendered with the Microsoft Edge WebView2 Runtime. Clippycap does not bundle it;
+it is installed separately -- either by the Clippycap installer (which downloads Microsoft's official
+"Evergreen Bootstrapper", https://go.microsoft.com/fwlink/p/?LinkId=2124703 , if the Runtime is
+missing), or by the user. The WebView2 Runtime is distributed by Microsoft under Microsoft's own terms:
+https://developer.microsoft.com/microsoft-edge/webview2/
