@@ -917,6 +917,7 @@
   <div class="overlay">
     <div class="otop">
       <button class="btn sm" onclick={closeDetail}>← Library</button>
+      <button class="btn sm" onclick={() => history.back()} title="Back to the previously viewed clip">↶ Back</button>
       <button class="btn sm" onclick={() => gotoSibling(-1)} title="Previous clip ({binding('prev_asset')})">‹</button>
       <button class="btn sm" onclick={() => gotoSibling(1)} title="Next clip ({binding('next_asset')})">›</button>
       {#if editingTitle}
@@ -1342,10 +1343,10 @@
 
 <style>
   .app { display: flex; flex-direction: column; height: 100%; }
-  header.topbar { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 54px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
-  .brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
-  .brand-name { font-size: 15px; font-weight: 700; letter-spacing: 0.01em; color: var(--text); }
-  .logo { width: 28px; height: 28px; object-fit: contain; flex: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
+  header.topbar { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 60px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
+  .brand { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
+  .brand-name { font-size: 16px; font-weight: 700; letter-spacing: 0.01em; color: var(--text); }
+  .logo { width: 44px; height: 44px; object-fit: contain; flex: none; filter: drop-shadow(0 2px 4px rgba(0,0,0,0.55)); }
   .topbar-fill { flex: 1; min-width: 12px; align-self: stretch; }
   .search { flex: 1; max-width: 460px; border-radius: 999px; }
   .sort { width: auto; }
@@ -1412,7 +1413,7 @@
   .pill { color: #f7f9fb; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
   .pill .x { font-weight: 800; }
   .overlay { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; z-index: 50; }
-  .otop { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 54px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
+  .otop { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 60px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
   .otop-fill { flex: 1; min-width: 12px; align-self: stretch; }
   .otitle { font-weight: 700; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button.otitle { background: transparent; border: none; color: inherit; cursor: pointer; padding: 0; font: inherit; font-weight: 700; text-align: left; }
@@ -1437,7 +1438,7 @@
   .note-display { white-space: pre-wrap; word-break: break-word; font-size: 13px; min-height: 44px; padding: 7px 9px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; cursor: text; line-height: 1.45; }
   .note-display:hover { border-color: #3a4350; }
   .mention { color: var(--accent); cursor: pointer; text-decoration: underline; font-weight: 600; }
-  .mention:hover { color: #ffb482; }
+  .mention:hover { color: #a78bfa; }
   .notebody-edit { flex: 1; min-width: 110px; font-size: 12px; resize: vertical; }
   .mention-dropdown { position: fixed; z-index: 70; width: 240px; max-height: 240px; overflow-y: auto; background: var(--bg-1); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 6px 22px rgba(0,0,0,.5); padding: 4px; }
   .mention-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 4px 6px; border-radius: 5px; font-size: 12px; color: var(--text); background: transparent; border: none; cursor: pointer; }
@@ -1450,7 +1451,7 @@
   .mention-popup-note { font-size: 11px; color: var(--text-2); margin-top: 5px; padding-top: 5px; border-top: 1px solid var(--border); white-space: pre-wrap; word-break: break-word; max-height: 64px; overflow: hidden; }
   .mention-head { font-size: 10.5px; color: var(--text-3); padding: 4px 8px 2px; }
   .ts-badge { font-family: ui-monospace, monospace; font-size: 10px; font-weight: 700; color: var(--amber); background: rgba(240,179,79,.14); border: 1px solid rgba(240,179,79,.3); padding: 0 4px; border-radius: 4px; flex: none; white-space: nowrap; }
-  @keyframes noteglow { 0% { box-shadow: 0 0 0 0 rgba(255,106,43,0); } 22% { box-shadow: 0 0 0 4px rgba(255,106,43,.7); } 100% { box-shadow: 0 0 0 0 rgba(255,106,43,0); } }
+  @keyframes noteglow { 0% { box-shadow: 0 0 0 0 rgba(124,92,245,0); } 22% { box-shadow: 0 0 0 4px rgba(124,92,245,.7); } 100% { box-shadow: 0 0 0 0 rgba(124,92,245,0); } }
   .tsn.glow { animation: noteglow 1.6s ease; }
   .toasts { position: fixed; bottom: 16px; right: 16px; z-index: 90; display: flex; flex-direction: column; gap: 8px; max-width: 360px; }
   .toast { background: var(--bg-1); border: 1px solid var(--border); border-left: 3px solid var(--text-3); border-radius: 8px; padding: 9px 13px; font-size: 12.5px; box-shadow: 0 6px 22px rgba(0,0,0,.5); cursor: pointer; animation: toastin .18s ease; word-break: break-word; line-height: 1.4; }
@@ -1484,7 +1485,7 @@
   .card.sel { outline: 2.5px solid var(--accent); outline-offset: -2px; }
   .selbox { position: absolute; left: 6px; top: 6px; width: 18px; height: 18px; border-radius: 4px; border: 2px solid rgba(255,255,255,.55); background: rgba(0,0,0,.45); display: grid; place-items: center; font-size: 12px; font-weight: 900; color: #fff; opacity: 0; pointer-events: none; transition: opacity .1s; }
   .thumb:hover .selbox, .selbox.on { opacity: 1; pointer-events: auto; }
-  .selbox.on { background: var(--accent); border-color: var(--accent); color: #1a0e07; }
+  .selbox.on { background: var(--accent); border-color: var(--accent); color: #ffffff; }
   .bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 11px; margin-bottom: 10px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; }
   .bulkbar label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
   .bulkbar select { background: var(--bg-2); color: inherit; border: 1px solid var(--border); border-radius: 5px; padding: 2px 4px; }
@@ -1502,14 +1503,14 @@
   .tagimg-prev { width: 26px; height: 26px; }
   .btn:disabled { opacity: .5; cursor: default; }
   .timeline { position: relative; height: 16px; background: var(--bg-2); border-radius: 5px; cursor: pointer; flex: none; overflow: hidden; }
-  .timeline .sel { position: absolute; top: 0; bottom: 0; background: rgba(255,106,43,.22); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }
+  .timeline .sel { position: absolute; top: 0; bottom: 0; background: rgba(124,92,245,.22); border-left: 2px solid var(--accent); border-right: 2px solid var(--accent); }
   .timeline .nbar { position: absolute; top: 3px; bottom: 3px; background: rgba(240,179,79,.55); border-radius: 2px; }
   .timeline .ntick { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--amber); }
   .timeline .playhead { position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px; background: #fff; box-shadow: 0 0 5px rgba(255,255,255,.7); pointer-events: none; }
   .timeline { touch-action: none; }
   .timeline .handle { position: absolute; top: 0; bottom: 0; width: 10px; margin-left: -5px; background: var(--accent); border-radius: 3px; cursor: ew-resize; z-index: 2; box-shadow: 0 0 0 1px rgba(0,0,0,.45); display: grid; place-items: center; touch-action: none; }
   .timeline .handle::after { content: ''; width: 2px; height: 60%; background: rgba(0,0,0,.55); border-radius: 1px; }
-  .timeline .handle:hover { background: #ffb482; }
+  .timeline .handle:hover { background: #a78bfa; }
   .timeline.dragging { cursor: ew-resize; }
   .trim { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
   .trim .seltext { font-family: ui-monospace, monospace; font-size: 11.5px; font-weight: 700; color: var(--amber); }
@@ -1529,6 +1530,6 @@
   .srow select { padding: 3px 6px; background: var(--bg-2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; }
   .kbd-edit { font-family: ui-monospace, monospace; font-size: 11.5px; background: var(--bg-3); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 3px 9px; min-width: 116px; text-align: center; cursor: pointer; }
   .kbd-edit:hover { border-color: var(--accent); }
-  .kbd-edit.capturing { background: var(--accent); color: #1a0e07; border-color: var(--accent); }
+  .kbd-edit.capturing { background: var(--accent); color: #ffffff; border-color: var(--accent); }
   .mfoot { display: flex; align-items: center; padding: 10px 16px; border-top: 1px solid var(--border); gap: 8px; background: var(--bg-1); }
 </style>

@@ -52,9 +52,9 @@ html,body{margin:0;height:100%;background:#0e1014;color:#e7eaf0;
  font-family:'Segoe UI Variable Text','Segoe UI',system-ui,sans-serif;overflow:hidden}
 .w{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;
  -webkit-user-select:none;user-select:none}
-.n{font-size:30px;font-weight:700;letter-spacing:.04em}.n .c{color:#ff6a2b}
+.n{font-size:30px;font-weight:700;letter-spacing:.04em}.n .c{color:#7c5cf5}
 .b{width:170px;height:3px;border-radius:3px;background:#222732;overflow:hidden;position:relative}
-.b::after{content:"";position:absolute;top:0;bottom:0;left:-40%;width:40%;background:#ff6a2b;border-radius:3px;
+.b::after{content:"";position:absolute;top:0;bottom:0;left:-40%;width:40%;background:#7c5cf5;border-radius:3px;
  animation:s 1.1s ease-in-out infinite}@keyframes s{0%{left:-40%}100%{left:100%}}
 .s{font-size:12px;color:#6b7480;letter-spacing:.06em}
 </style></head><body><div class="w"><div class="n"><span class="c">C</span>lippycap</div>
