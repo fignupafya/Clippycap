@@ -1,19 +1,23 @@
-# Build Clippycap's distributables.  Run:  powershell -ExecutionPolicy Bypass -File packaging\build.ps1
+# Build Clippycap's distributables.  Run:  powershell -ExecutionPolicy Bypass -File build.ps1
 #
-# This script IS the recipe -- anyone can run it to reproduce the released .exe files from source
-# (so there's no need to trust a prebuilt binary). When it finishes, the *repo root* holds:
+# This script IS the recipe -- run it and you get the same .exe files that ship in a release, so you
+# never have to trust a prebuilt binary. When it finishes, THIS folder (the repo root) holds:
 #
-#   Clippycap-Portable.exe   -- a single self-contained .exe; nothing to install, just run it
+#   Clippycap-Portable.exe   -- one self-contained .exe; nothing to install, just run it
 #   Clippycap-Setup.exe      -- the Windows installer  (only if Inno Setup 6 is installed)
 #
-# and it removes its own temporary build directories (build\, dist\) afterwards.
+# ...and nothing else extra -- the temporary build directories (build\, dist\) are removed afterwards.
 #
-# Prerequisites: Python 3.12+ with the project + its deps installed (a .venv at the repo root is used
-# if present, else the `python` on PATH); Node.js + npm; and, optionally, Inno Setup 6 for the installer.
-# ffmpeg is NOT bundled -- the app downloads it on demand -- so you don't need it to build.
+# Prerequisites:
+#   - Python 3.13 with the project + its deps installed (a .venv at the repo root is used if present,
+#     else the `python` on PATH).  [The desktop window uses pywebview, whose pythonnet dep has no
+#     Python 3.14 wheels yet -- on 3.14 the app still works but falls back to a Chrome/Edge --app window.]
+#   - Node.js + npm.
+#   - Optional: Inno Setup 6 (https://jrsoftware.org/isdl.php) to also build the installer.
+# FFmpeg is NOT bundled -- the app downloads it on demand -- so you don't need it to build.
 
 $ErrorActionPreference = "Stop"
-Set-Location (Split-Path $PSScriptRoot -Parent)          # -> repo root
+Set-Location $PSScriptRoot          # this script lives at the repo root
 
 function Invoke-Step([string]$Name, [scriptblock]$Body) {
     Write-Host ""
@@ -28,8 +32,8 @@ if (-not (Test-Path $py)) { $py = "python" }
 Invoke-Step "building the web UI (npm run build)" {
     npm --prefix web run build
 }
-Invoke-Step "ensuring PyInstaller is installed" {
-    & $py -m pip install -q "pyinstaller>=6.0"
+Invoke-Step "ensuring PyInstaller + pywebview are installed" {
+    & $py -m pip install -q "pyinstaller>=6.0" "pywebview>=5.1"
 }
 Invoke-Step "bundling with PyInstaller (portable .exe + one-folder build)" {
     & $py -m PyInstaller --noconfirm packaging\clippycap.spec
@@ -40,7 +44,11 @@ $iscc = $null
 $cmd = Get-Command iscc.exe -ErrorAction SilentlyContinue
 if ($cmd) { $iscc = $cmd.Source }
 if (-not $iscc) {
-    foreach ($p in @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe")) {
+    foreach ($p in @(
+        "$env:LocalAppData\Programs\Inno Setup 6\ISCC.exe",
+        "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+        "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+    )) {
         if (Test-Path $p) { $iscc = $p; break }
     }
 }
@@ -54,7 +62,7 @@ if ($iscc) {
     Write-Warning "Install Inno Setup 6 from https://jrsoftware.org/isdl.php and re-run this script to build the installer too."
 }
 
-# move the produced .exe files into the repo root, then remove the temporary build dirs.
+# collect the produced .exe files into the repo root, then drop the temporary build directories.
 $produced = @()
 foreach ($n in @("Clippycap-Portable.exe", "Clippycap-Setup.exe")) {
     if (Test-Path "dist\$n") {

@@ -61,6 +61,7 @@ class ConfigService:
         player: Mapping[str, Any] | None = None,
         keybindings: Mapping[str, str] | None = None,
         media: Mapping[str, Any] | None = None,
+        shell: Mapping[str, Any] | None = None,
     ) -> Config:
         """Apply a partial override, persist it (deep-merged onto ``local.toml``), and return the
         reloaded :class:`Config`. Sections passed as ``None`` are left untouched.
@@ -77,6 +78,8 @@ class ConfigService:
             overrides["keybindings"] = dict(keybindings)
         if media is not None:
             overrides["media"] = dict(media)
+        if shell is not None:
+            overrides["shell"] = dict(shell)
         previous = self._read_local()
         self._write_local(_deep_merge(previous, overrides))
         try:

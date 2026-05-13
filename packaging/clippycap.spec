@@ -5,15 +5,16 @@
 #   dist/Clippycap/               -- a one-folder build (Clippycap.exe + _internal/). Faster startup;
 #                                    this is what packaging/installer.iss wraps into Clippycap-Setup.exe.
 #
-# Build:  pyinstaller --noconfirm packaging/clippycap.spec   (packaging/build.ps1 builds the web UI
-# first, then runs this, then -- if Inno Setup is installed -- compiles the installer).
+# Build:  pyinstaller --noconfirm packaging/clippycap.spec   (or just run build.ps1 at the repo root,
+# which builds the web UI first, runs this, then -- if Inno Setup is installed -- compiles the installer,
+# and finally moves Clippycap-Portable.exe / Clippycap-Setup.exe to the repo root).
 #
 # Bundled data: config/default.toml (always) and web/dist/ (the built Svelte SPA, if present -- without
 # it the backend serves a placeholder page).  ffmpeg is NOT bundled: it's large (~150 MB) and licence-
 # encumbered, so the app downloads a static build on demand (Settings > FFmpeg / the first-run prompt),
 # or the installer offers to. It always lands in %APPDATA%\Clippycap\bin\.
 #
-# A custom icon: drop a packaging/clippycap.ico here (it is picked up automatically below).
+# The window/exe icon is packaging/clippycap.ico (picked up automatically below if present).
 
 from pathlib import Path
 
@@ -29,7 +30,15 @@ hiddenimports = [
     "uvicorn.protocols", "uvicorn.protocols.http", "uvicorn.protocols.http.auto",
     "uvicorn.protocols.websockets", "uvicorn.protocols.websockets.auto",
     "uvicorn.lifespan", "uvicorn.lifespan.on",
+    # pywebview picks its window backend by name at runtime; we force the WebView2 one.
+    "webview.platforms.edgechromium",
+    # pythonnet's .NET-Framework loader (clr_loader) -- chosen dynamically by clr.
+    "clr_loader", "clr_loader.netfx",
 ]
+
+# Keep the bundle lean: pywebview's PyInstaller hook would otherwise collect every window backend,
+# pulling in Qt / GTK / CEF. We only use edgechromium (and a no-ffmpeg/--app fallback elsewhere).
+excludes = ["tkinter", "PyQt5", "PyQt6", "PySide2", "PySide6", "cefpython3", "gi", "qtpy"]
 
 _icon = ROOT / "packaging" / "clippycap.ico"
 icon = str(_icon) if _icon.is_file() else None
@@ -38,7 +47,7 @@ a = Analysis(
     [str(ROOT / "packaging" / "clippycap_entry.py")],
     pathex=[str(ROOT / "src")],
     binaries=[], datas=datas, hiddenimports=hiddenimports,
-    hookspath=[], excludes=["tkinter"], noarchive=False,
+    hookspath=[], excludes=excludes, noarchive=False,
 )
 pyz = PYZ(a.pure)
 

@@ -2,6 +2,8 @@
   import { onMount } from 'svelte';
   import { api } from './lib/api';
   import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
+  import TitleBar from './lib/TitleBar.svelte';
+  import logoUrl from './assets/clippycap-logo.png';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
@@ -62,6 +64,7 @@
   let editNoteBodyId = $state<number | null>(null);
   let noteBodyDraft = $state('');
   let scanJob = $state<{ scanned: number } | null>(null);
+  let nativeWindow = $state(false);   // true when running inside the pywebview shell -> show our own title bar
   let showTags = $state(false);
   let showKeys = $state(false);
   let showSettings = $state(false);
@@ -173,6 +176,10 @@
   }
 
   onMount(() => {
+    // pywebview injects `window.pywebview` (sometimes before our JS runs, sometimes after via the
+    // `pywebviewready` event); when present, render our custom frameless-window title bar.
+    if ((window as unknown as { pywebview?: unknown }).pywebview) nativeWindow = true;
+    else window.addEventListener('pywebviewready', () => { nativeWindow = true; }, { once: true });
     void loadTags(); void loadSources();
     void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
     void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
@@ -810,6 +817,8 @@
 
 <svelte:window onkeydown={onKey} onpointermove={onPointerMove} onpointerup={endDrag} onpointercancel={endDrag} onpointerdown={onWindowPointerDown} onhashchange={syncFromHash} />
 
+{#if nativeWindow}<TitleBar />{/if}
+
 <div class="app">
   <header>
     <div class="brand"><span class="logo">C</span> Clippycap</div>
@@ -1328,7 +1337,9 @@
 {/if}
 
 <style>
-  .app { display: flex; flex-direction: column; height: 100%; }
+  /* the body's #app holds the (optional) frameless-window title bar + the app, stacked */
+  :global(#app) { display: flex; flex-direction: column; }
+  .app { display: flex; flex-direction: column; flex: 1; min-height: 0; }
   header { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 50px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
   .brand { font-weight: 800; display: flex; align-items: center; gap: 8px; white-space: nowrap; }
   .logo { width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg, var(--accent), #9a3412); color: #1a0e07; display: grid; place-items: center; font-weight: 900; }
