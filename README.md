@@ -51,7 +51,7 @@ the temporary `dist\` / `build\`. After it finishes the root holds exactly `buil
 See [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the full design — the layered/hexagonal structure
 (`core` → `app` → `infra` → `api` → `web`, plus a plugin layer), the extension points, the
 scan/identity flows, the SQLite schema, packaging, the **decision log** (§14), and the **roadmap**
-(§15). Working conventions are in [`CLAUDE.md`](./CLAUDE.md).
+(§15).
 
 Stack: **Python 3.13** + FastAPI (which also serves the built frontend); SQLite + FTS5;
 [pywebview] / WebView2 for the window; Svelte 5 + Vite + TypeScript for the UI; ffmpeg/ffprobe via a

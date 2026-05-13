@@ -229,7 +229,7 @@ class _WindowApi:
         if form is None:
             return
         try:
-            from System import Action  # type: ignore[import-not-found]  # noqa: PLC0415 -- pythonnet
+            from System import Action  # noqa: PLC0415 -- pythonnet; .NET BCL, resolved at runtime
 
             x, y, w, h = int(left), int(top), int(width), int(height)
 
