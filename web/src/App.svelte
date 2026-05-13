@@ -181,20 +181,69 @@
     if ((window as unknown as { pywebview?: unknown }).pywebview) nativeWindow = true;
     else window.addEventListener('pywebviewready', () => { nativeWindow = true; }, { once: true });
 
-    // Drag / resize via the OS, not pywebview's JS MoveWindow loop -- this is what makes Aero Snap
-    // (drag-to-edge -> half-screen preview), double-click-to-maximize, and the resize cursors all
-    // work on our otherwise-frameless window. Capture phase + stopImmediatePropagation pre-empts
-    // pywebview's own bubble-phase drag handler so we don't get both.
+    // Drag and resize on a frameless pywebview window. Capture phase + stopImmediatePropagation
+    // pre-empts pywebview's own bubble-phase drag handler (which would otherwise also fire and
+    // fight us).
+    //
+    // - Drag is handed off to the OS via WM_NCLBUTTONDOWN(HTCAPTION) -- that's what gives us Aero
+    //   Snap (drag-to-edge -> half-screen preview), proper drag cursor, double-click-to-maximize.
+    // - Resize is JS-driven (mousemove -> set_window_bounds) because Windows' modal SIZE loop won't
+    //   engage on a window without WS_THICKFRAME, and adding that flag would paint a visible gray
+    //   border on our otherwise-frameless form. Throttled to one rAF tick (~60 Hz) so we don't
+    //   flood the IPC channel.
+    type WinApi = {
+      start_drag(): void;
+      get_window_bounds(): Promise<[number, number, number, number]>;
+      set_window_bounds(l: number, t: number, w: number, h: number): void;
+    };
+    const MIN_W = 800, MIN_H = 600;
     function onCaptureMouseDown(e: MouseEvent) {
       if (e.button !== 0) return;
-      const api = (window as unknown as { pywebview?: { api?: { start_drag(): void; start_resize(dir: number): void } } }).pywebview?.api;
+      const api = (window as unknown as { pywebview?: { api?: WinApi } }).pywebview?.api;
       if (!api) return;                                    // browser / --app mode -- let it be
       const target = e.target as HTMLElement | null;
       if (!target) return;
+
       const edge = target.closest('.resize-edge') as HTMLElement | null;
       if (edge && edge.dataset.dir) {
         e.preventDefault(); e.stopImmediatePropagation();
-        api.start_resize(parseInt(edge.dataset.dir, 10));
+        const dir = parseInt(edge.dataset.dir, 10);
+        const isLeft = dir === 10 || dir === 13 || dir === 16;
+        const isRight = dir === 11 || dir === 14 || dir === 17;
+        const isTop = dir === 12 || dir === 13 || dir === 14;
+        const isBottom = dir === 15 || dir === 16 || dir === 17;
+        const startX = e.screenX, startY = e.screenY;
+        void api.get_window_bounds().then(([l0, t0, w0, h0]) => {
+          let pending: { l: number; t: number; w: number; h: number } | null = null;
+          let rafQueued = false;
+          const flush = () => {
+            rafQueued = false;
+            if (pending) { api.set_window_bounds(pending.l, pending.t, pending.w, pending.h); pending = null; }
+          };
+          const onMove = (ev: MouseEvent) => {
+            const dx = ev.screenX - startX, dy = ev.screenY - startY;
+            let l = l0, t = t0, w = w0, h = h0;
+            if (isRight) w = Math.max(MIN_W, w0 + dx);
+            if (isLeft) {
+              const nw = Math.max(MIN_W, w0 - dx);
+              l = l0 + (w0 - nw); w = nw;
+            }
+            if (isBottom) h = Math.max(MIN_H, h0 + dy);
+            if (isTop) {
+              const nh = Math.max(MIN_H, h0 - dy);
+              t = t0 + (h0 - nh); h = nh;
+            }
+            pending = { l, t, w, h };
+            if (!rafQueued) { rafQueued = true; requestAnimationFrame(flush); }
+          };
+          const onUp = () => {
+            window.removeEventListener('mousemove', onMove, true);
+            window.removeEventListener('mouseup', onUp, true);
+            if (pending) flush();
+          };
+          window.addEventListener('mousemove', onMove, true);
+          window.addEventListener('mouseup', onUp, true);
+        });
         return;
       }
       if (target.closest('.pywebview-drag-region')) {
