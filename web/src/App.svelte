@@ -925,9 +925,10 @@
       {:else}
         <button class="otitle" onclick={startEditTitle} title="rename — the displayed title (the file on disk isn't touched)">{d.title} <span class="faint" style:font-size="11px">✎</span></button>
       {/if}
-      <span style:flex="1"></span>
+      <span class="otop-fill pywebview-drag-region"></span>
       <button class="btn sm" onclick={deleteCurrentClip} title="Delete this clip and its file from disk">🗑 Delete clip</button>
       <button class="btn sm" onclick={() => (showKeys = true)} title="Keyboard shortcuts">⌨ Keys</button>
+      {#if nativeWindow}<WindowControls />{/if}
     </div>
     <div class="obody">
       <div class="player">
@@ -1049,12 +1050,12 @@
               <textarea class="field notebody-edit" rows="2" bind:value={noteBodyDraft}
                         oninput={(e) => onMentionInput(e, (s) => { noteBodyDraft = s; })}
                         onkeydown={(e) => { if (onMentionKey(e)) return; if (e.key === 'Escape') editNoteBodyId = null; else if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void saveNoteBody(n.id); } }}></textarea>
-              <button class="x" onclick={() => saveNoteBody(n.id)} title="save">✔</button>
+              <button class="tsnbtn" onclick={() => saveNoteBody(n.id)} title="save">✔</button>
               <button class="x" onclick={() => (editNoteBodyId = null)} title="cancel">×</button>
             {:else}
               <span class="body">{@render noteBody(n.body)}</span>
-              <button class="x" onclick={() => startEditNoteBody(n)} title="edit the text — type @ to link a clip">📝</button>
-              <button class="x" onclick={() => retimeNote(n)} title="move to the current playhead ({fmt(curMs)})">↻</button>
+              <button class="tsnbtn" onclick={() => startEditNoteBody(n)} title="edit the text — type @ to link a clip">📝</button>
+              <button class="tsnbtn" onclick={() => retimeNote(n)} title="move to the current playhead ({fmt(curMs)})">↻</button>
               <button class="x" onclick={() => deleteNote(n.id)} title="delete">🗑</button>
             {/if}
           </div>
@@ -1341,10 +1342,10 @@
 
 <style>
   .app { display: flex; flex-direction: column; height: 100%; }
-  header.topbar { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 50px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
-  .brand { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-  .brand-name { font-weight: 800; }
-  .logo { width: 22px; height: 22px; object-fit: contain; flex: none; }
+  header.topbar { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 54px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
+  .brand { display: flex; align-items: center; gap: 9px; white-space: nowrap; }
+  .brand-name { font-size: 15px; font-weight: 700; letter-spacing: 0.01em; color: var(--text); }
+  .logo { width: 28px; height: 28px; object-fit: contain; flex: none; filter: drop-shadow(0 1px 2px rgba(0,0,0,0.45)); }
   .topbar-fill { flex: 1; min-width: 12px; align-self: stretch; }
   .search { flex: 1; max-width: 460px; border-radius: 999px; }
   .sort { width: auto; }
@@ -1411,8 +1412,9 @@
   .pill { color: #f7f9fb; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
   .pill .x { font-weight: 800; }
   .overlay { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; z-index: 50; }
-  .otop { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 48px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
-  .otitle { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .otop { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 54px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
+  .otop-fill { flex: 1; min-width: 12px; align-self: stretch; }
+  .otitle { font-weight: 700; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button.otitle { background: transparent; border: none; color: inherit; cursor: pointer; padding: 0; font: inherit; font-weight: 700; text-align: left; }
   button.otitle:hover { color: var(--accent); }
   .timeline .ntick, .timeline .nbar { cursor: grab; }
@@ -1430,6 +1432,8 @@
   .tsn { display: flex; gap: 8px; align-items: flex-start; padding: 7px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; margin-bottom: 6px; }
   .tsn .ts { font-family: ui-monospace, monospace; font-size: 11.5px; font-weight: 700; color: var(--amber); background: rgba(240,179,79,.13); border: 1px solid rgba(240,179,79,.3); padding: 2px 6px; border-radius: 5px; flex: none; }
   .tsn .body { flex: 1; font-size: 13px; word-break: break-word; white-space: pre-wrap; }
+  .tsnbtn { background: transparent; border: none; padding: 0 3px; color: var(--text-3); cursor: pointer; transition: color 0.12s ease; font: inherit; }
+  .tsnbtn:hover { color: var(--accent); }
   .note-display { white-space: pre-wrap; word-break: break-word; font-size: 13px; min-height: 44px; padding: 7px 9px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 7px; cursor: text; line-height: 1.45; }
   .note-display:hover { border-color: #3a4350; }
   .mention { color: var(--accent); cursor: pointer; text-decoration: underline; font-weight: 600; }
