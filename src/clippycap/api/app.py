@@ -59,7 +59,8 @@ def _tag_dict(tag: Tag) -> dict[str, Any]:
 def _asset_dict(asset: Asset) -> dict[str, Any]:
     return {
         "id": asset.id, "media_type": asset.media_type, "title": asset.title,
-        "size_bytes": asset.size_bytes, "metadata": asset.metadata, "added_at": _iso(asset.added_at),
+        "size_bytes": asset.size_bytes, "metadata": asset.metadata,
+        "metadata_pending": asset.metadata_pending, "added_at": _iso(asset.added_at),
         "last_seen_at": _iso(asset.last_seen_at), "last_opened_at": _iso(asset.last_opened_at),
         "thumbnail_url": f"/thumbnails/{asset.id}", "stream_url": f"/media/{asset.id}/stream",
     }
@@ -138,10 +139,6 @@ class TagBody(BaseModel):
     image_ref: str | None = None
     description: str = ""
     sort_order: int = 0
-
-
-class TitleBody(BaseModel):
-    title: str = Field(min_length=1)
 
 
 class RenameFileBody(BaseModel):
@@ -323,12 +320,10 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     def get_asset(app: AppDep, asset_id: int) -> dict[str, Any]:
         return _detail_dict(app.assets.get_detail(asset_id))
 
-    @api.patch("/api/assets/{asset_id}")
-    def rename_asset(app: AppDep, asset_id: int, body: TitleBody) -> dict[str, Any]:
-        return _asset_dict(app.assets.update_title(asset_id, body.title))
-
     @api.post("/api/assets/{asset_id}/rename-file")
     def rename_asset_file(app: AppDep, asset_id: int, body: RenameFileBody) -> dict[str, Any]:
+        # The clip's name IS its file name; renaming the file is the only "rename" -- it keeps the
+        # title, the on-disk file and the path index consistent by construction.
         return _asset_dict(app.assets.rename_file(asset_id, body.name))
 
     @api.patch("/api/assets/{asset_id}/metadata")
@@ -607,6 +602,15 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     @api.post("/api/scan", status_code=202)
     def scan_all(app: AppDep) -> dict[str, str]:
         return {"job_id": app.scans.scan_all()}
+
+    @api.post("/api/reconcile")
+    def reconcile(app: AppDep) -> dict[str, Any]:
+        # A fast, hashing-free re-sync of the path index: picks up files renamed / moved / deleted
+        # outside the app. A plain (non-async) handler, so FastAPI runs it in a worker thread and
+        # the filesystem walk never blocks the event loop. The UI calls this on window focus.
+        r = app.scans.reconcile()
+        return {"changed": r.changed, "renamed": r.renamed,
+                "vanished": r.vanished, "restored": r.restored}
 
     @api.get("/api/jobs")
     def list_jobs(app: AppDep) -> list[dict[str, Any]]:

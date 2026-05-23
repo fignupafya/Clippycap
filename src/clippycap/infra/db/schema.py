@@ -1,10 +1,19 @@
 """The SQLite schema and the forward-only migration list.
 
 Migrations run in order at startup; ``PRAGMA user_version`` records how far we have got. Evolving
-the schema later means *appending* a new ``(version, sql)`` entry -- never editing an old one.
+the schema later means *appending* a new ``(version, step)`` entry -- never editing an old one. A
+step is either a SQL string (run with ``executescript``) or a callable ``(connection) -> None`` for
+data migrations that need real logic (timezone conversion, parsing, ...). Migration callables are
+kept *self-contained* -- they must not import app code that could change underneath them.
 """
 
 from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Callable
+from datetime import datetime
+from pathlib import PureWindowsPath
 
 _SCHEMA_V1 = """
 CREATE TABLE app_meta (
@@ -149,5 +158,98 @@ END;
 # v2: a timestamped note may span an interval (end_timestamp_ms), not just a single moment.
 _MIGRATION_V2 = "ALTER TABLE notes ADD COLUMN end_timestamp_ms INTEGER;"
 
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _SCHEMA_V1), (2, _MIGRATION_V2))
+# v3: index the recorded_at sort expression -- the default library sort orders by it, and the grid
+# is paginated, so this keeps ORDER BY ... LIMIT cheap as the library grows.
+_MIGRATION_V3 = (
+    "CREATE INDEX IF NOT EXISTS idx_assets_recorded "
+    "ON assets(json_extract(metadata_json, '$.recorded_at'));"
+)
+
+
+def _canonical_recorded_at(raw: str) -> str | None:
+    """Reformat a stored recorded_at to canonical naive-local ``YYYY-MM-DDTHH:MM:SS``; ``None`` if
+    it cannot be parsed. Self-contained (see the module docstring) -- a frozen copy of the rule."""
+    try:
+        parsed = datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:                       # UTC / offset -> machine-local wall clock
+        try:
+            parsed = parsed.astimezone().replace(tzinfo=None)
+        except (OSError, OverflowError, ValueError):
+            return None                                 # pre-epoch sentinel the OS can't convert
+    return parsed.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _migration_v4_normalize_recorded_at(conn: sqlite3.Connection) -> None:
+    """Rewrite every asset's ``metadata_json.recorded_at`` to one canonical naive-local format.
+
+    Older builds stored three inconsistent shapes -- naive-local parsed from an OBS file name, UTC
+    ``...Z`` from ffprobe, UTC ``...+00:00`` from the file mtime -- so the string-based date sort was
+    wrong wherever the shapes were mixed (a library of only OBS-named clips was unaffected). This
+    fixes existing rows in place; new scans already write the canonical form."""
+    rows = conn.execute("SELECT id, metadata_json FROM assets").fetchall()
+    for row in rows:
+        try:
+            meta = json.loads(row["metadata_json"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(meta, dict) or not isinstance(meta.get("recorded_at"), str):
+            continue
+        raw = meta["recorded_at"]
+        canonical = _canonical_recorded_at(raw)
+        if canonical == raw:
+            continue
+        if canonical is None:
+            meta.pop("recorded_at", None)               # unparseable -> drop, don't sort on junk
+        else:
+            meta["recorded_at"] = canonical
+        conn.execute("UPDATE assets SET metadata_json = ? WHERE id = ?", (json.dumps(meta), row["id"]))
+
+
+# v5: index hash_cache by (size, mtime_ns) so the background reconciler can match a renamed file to
+# its old entry without re-hashing -- see infra/scan/reconciler.py.
+_MIGRATION_V5 = "CREATE INDEX IF NOT EXISTS idx_hash_cache_sig ON hash_cache(size, mtime_ns);"
+
+
+def _migration_v6_titles_from_filenames(conn: sqlite3.Connection) -> None:
+    """Re-derive every asset's title from its file name. Older builds set the title to the recording
+    timestamp; the title is now simply the file's own name (the recording time is shown separately
+    from ``recorded_at``). Picks the asset's present path, else its first-seen one."""
+    rows = conn.execute(
+        "SELECT a.id AS id, ("
+        " SELECT p.path FROM asset_paths p WHERE p.asset_id = a.id "
+        " ORDER BY p.present DESC, p.id ASC LIMIT 1) AS path "
+        "FROM assets a"
+    ).fetchall()
+    for row in rows:
+        if not row["path"]:
+            continue
+        stem = PureWindowsPath(row["path"]).stem
+        if stem:
+            conn.execute("UPDATE assets SET title = ? WHERE id = ?", (stem, row["id"]))
+
+
+# v7: the two-phase scan. Discovery records an asset fast; a background enrichment pass then reads
+# its duration / resolution into metadata_json and clears `metadata_pending`. Existing assets
+# already have their metadata, so the column defaults to 0 (not pending). The partial index keeps
+# "find the assets still awaiting enrichment" instant however large the library grows.
+_MIGRATION_V7 = (
+    "ALTER TABLE assets ADD COLUMN metadata_pending INTEGER NOT NULL DEFAULT 0;\n"
+    "CREATE INDEX idx_assets_metadata_pending ON assets(metadata_pending) WHERE metadata_pending = 1;"
+)
+
+
+# A migration step is SQL (run with executescript) or a callable for data migrations needing logic.
+MigrationStep = str | Callable[[sqlite3.Connection], None]
+
+MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
+    (1, _SCHEMA_V1),
+    (2, _MIGRATION_V2),
+    (3, _MIGRATION_V3),
+    (4, _migration_v4_normalize_recorded_at),
+    (5, _MIGRATION_V5),
+    (6, _migration_v6_titles_from_filenames),
+    (7, _MIGRATION_V7),
+)
 LATEST_VERSION: int = MIGRATIONS[-1][0]

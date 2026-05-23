@@ -49,6 +49,8 @@ class UiConfig(_Section):
     default_sort: str = Field(min_length=1)
     locale: str = Field(min_length=1)
     markdown_in_notes: bool
+    # Library-grid page size. Capped at 500 so a single page never floods the DOM with thumbnails.
+    page_size: int = Field(ge=1, le=500)
 
 
 class ScanConfig(_Section):
@@ -59,6 +61,9 @@ class ScanConfig(_Section):
     skip_modified_within_seconds: int = Field(ge=0)
     scan_on_startup: bool
     periodic_scan_minutes: int = Field(ge=0)
+    # How many files a scan processes per database commit -- so a large scan streams progressively
+    # into the library grid instead of appearing all at once at the end.
+    commit_batch_size: int = Field(ge=1, le=10000)
 
 
 class IdentityConfig(_Section):

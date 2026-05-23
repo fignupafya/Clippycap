@@ -327,6 +327,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"{application.config.app.name} is already running.")
         application.shutdown()
         return 1
+    # Heal the library in the background before the user does anything: re-identify a library left
+    # on a superseded identity format (submitted first, so any later scan queues behind it), then
+    # finish metadata for clips a previous run left pending. Both are instant no-ops when there is
+    # nothing to do.
+    application.scans.upgrade_identity_format()
+    application.scans.enrich_pending()
     api = create_app(application)
     cfg = application.config
     host = cfg.server.host
@@ -381,6 +387,7 @@ def _cmd_add_source(args: argparse.Namespace) -> int:
 def _cmd_scan(args: argparse.Namespace) -> int:
     application = _build(args.data_dir)
     try:
+        application.scans.upgrade_identity_format()   # re-identify a legacy library before scanning
         job_id = (
             application.scans.scan_source(args.source_id)
             if args.source_id is not None

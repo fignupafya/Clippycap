@@ -49,13 +49,18 @@ def _is_under(path: str, root: str) -> bool:
     return path == root or path.startswith(root + "\\") or path.startswith(root + "/")
 
 
+# ORDER BY clauses, one per sort key. Assets whose recorded_at / duration is unknown (NULL) always
+# sort to the END: SQLite's DESC already puts NULLs last, while ASC needs an explicit "(expr IS NULL)"
+# leading term to force the same. `a.added_at` / `a.id` are stable tie-breakers.
+_REC = "json_extract(a.metadata_json, '$.recorded_at')"
+_DUR = "CAST(json_extract(a.metadata_json, '$.duration_ms') AS INTEGER)"
 _SORT_CLAUSES: dict[str, str] = {
-    "recorded_desc":    "json_extract(a.metadata_json, '$.recorded_at') DESC, a.added_at DESC",
-    "recorded_asc":     "json_extract(a.metadata_json, '$.recorded_at') ASC, a.added_at ASC",
+    "recorded_desc":    f"{_REC} DESC, a.added_at DESC",
+    "recorded_asc":     f"({_REC} IS NULL), {_REC} ASC, a.added_at ASC",
     "added_desc":       "a.added_at DESC, a.id DESC",
     "added_asc":        "a.added_at ASC, a.id ASC",
-    "duration_desc":    "CAST(json_extract(a.metadata_json, '$.duration_ms') AS INTEGER) DESC, a.added_at DESC",
-    "duration_asc":     "CAST(json_extract(a.metadata_json, '$.duration_ms') AS INTEGER) ASC, a.added_at ASC",
+    "duration_desc":    f"{_DUR} DESC, a.added_at DESC",
+    "duration_asc":     f"({_DUR} IS NULL), {_DUR} ASC, a.added_at ASC",
     "title_asc":        "a.title COLLATE NOCASE ASC, a.id ASC",
     "tag_count_desc":   "(SELECT COUNT(*) FROM asset_tags z WHERE z.asset_id = a.id) DESC, a.added_at DESC",
     "last_opened_desc": "a.last_opened_at DESC, a.added_at DESC",
@@ -69,6 +74,7 @@ def _asset(r: sqlite3.Row) -> Asset:
         title=r["title"],
         size_bytes=r["size_bytes"],
         metadata=json.loads(r["metadata_json"]),
+        metadata_pending=bool(r["metadata_pending"]),
         added_at=_from_iso(r["added_at"]),
         last_seen_at=_from_iso(r["last_seen_at"]),
         last_opened_at=_from_iso(r["last_opened_at"]),
@@ -164,9 +170,10 @@ class SqliteAssetRepository(_Repo):
         try:
             cur = self._c.execute(
                 "INSERT INTO assets(identity_hash, media_type, title, size_bytes, metadata_json, "
-                "added_at, last_seen_at, last_opened_at, missing) VALUES (?,?,?,?,?,?,?,NULL,0)",
+                "added_at, last_seen_at, last_opened_at, missing, metadata_pending) "
+                "VALUES (?,?,?,?,?,?,?,NULL,0,?)",
                 (asset.identity_hash, asset.media_type, asset.title, asset.size_bytes,
-                 json.dumps(asset.metadata), added, added),
+                 json.dumps(asset.metadata), added, added, 1 if asset.metadata_pending else 0),
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"an asset with identity {asset.identity_hash!r} already exists") from exc
@@ -187,9 +194,10 @@ class SqliteAssetRepository(_Repo):
         try:
             self._c.execute(
                 "UPDATE assets SET identity_hash=?, media_type=?, title=?, size_bytes=?, metadata_json=?, "
-                "last_opened_at=? WHERE id=?",
+                "last_opened_at=?, metadata_pending=? WHERE id=?",
                 (asset.identity_hash, asset.media_type, asset.title, asset.size_bytes,
-                 json.dumps(asset.metadata), _iso_or_none(asset.last_opened_at), asset.id),
+                 json.dumps(asset.metadata), _iso_or_none(asset.last_opened_at),
+                 1 if asset.metadata_pending else 0, asset.id),
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"another asset already has identity {asset.identity_hash!r}") from exc
@@ -260,6 +268,22 @@ class SqliteAssetRepository(_Repo):
         ).fetchall()
         return [_asset(r) for r in rows], total
 
+    def pending_metadata_ids(self) -> list[int]:
+        rows = self._c.execute(
+            "SELECT a.id FROM assets a WHERE a.metadata_pending = 1 AND EXISTS "
+            "(SELECT 1 FROM asset_paths p WHERE p.asset_id = a.id AND p.present = 1) ORDER BY a.id"
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+    def asset_ids_with_foreign_identity(self, media_type: str, current_prefix: str) -> list[int]:
+        # substr(hash, 1, N) is the hash's first N chars -- compared against the strategy's prefix,
+        # so no LIKE wildcard escaping is needed however the prefix is spelled.
+        rows = self._c.execute(
+            "SELECT id FROM assets WHERE media_type = ? AND substr(identity_hash, 1, ?) <> ?",
+            (media_type, len(current_prefix), current_prefix),
+        ).fetchall()
+        return [r["id"] for r in rows]
+
     # paths --------------------------------------------------------------
 
     def add_path(self, path: AssetPath) -> AssetPath:
@@ -278,6 +302,9 @@ class SqliteAssetRepository(_Repo):
         rows = self._c.execute("SELECT * FROM asset_paths WHERE asset_id = ? ORDER BY id", (asset_id,)).fetchall()
         return [_asset_path(r) for r in rows]
 
+    def all_paths(self) -> list[AssetPath]:
+        return [_asset_path(r) for r in self._c.execute("SELECT * FROM asset_paths ORDER BY id").fetchall()]
+
     def find_by_path(self, path: str) -> Asset | None:
         row = self._c.execute(
             "SELECT a.* FROM assets a JOIN asset_paths p ON p.asset_id = a.id WHERE p.path = ?", (path,)
@@ -289,6 +316,11 @@ class SqliteAssetRepository(_Repo):
             self._c.execute("UPDATE asset_paths SET path = ? WHERE path = ?", (new_path, old_path))
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"a file is already registered at {new_path!r}") from exc
+
+    def set_path_present(self, path_id: int, present: bool) -> None:
+        self._c.execute(
+            "UPDATE asset_paths SET present = ? WHERE id = ?", (1 if present else 0, path_id)
+        )
 
     def upsert_path(self, asset_id: int, path: str, volume_id: str | None) -> None:
         now = _now()
@@ -685,6 +717,12 @@ class SqliteHashCacheStore(_Repo):
             (path, size, mtime_ns),
         ).fetchone()
         return row["identity_hash"] if row else None
+
+    def entry(self, path: str) -> tuple[int, int, str] | None:
+        row = self._c.execute(
+            "SELECT size, mtime_ns, identity_hash FROM hash_cache WHERE path = ?", (path,)
+        ).fetchone()
+        return (row["size"], row["mtime_ns"], row["identity_hash"]) if row else None
 
     def put(self, path: str, size: int, mtime_ns: int, identity_hash: str) -> None:
         self._c.execute(

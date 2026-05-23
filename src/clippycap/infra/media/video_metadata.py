@@ -15,7 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from clippycap.infra.media.ffmpeg import FfmpegToolsHolder
+from clippycap.infra.media.ffmpeg import NO_WINDOW, FfmpegToolsHolder
 
 _log = logging.getLogger(__name__)
 _PROBE_TIMEOUT = 30
@@ -63,6 +63,7 @@ def parse_ffprobe(data: dict[str, Any]) -> dict[str, Any]:
             out["duration_ms"] = round(float(duration) * 1000)
     except (TypeError, ValueError):
         pass
+    # the raw container creation_time (UTC); VideoMediaType.extract_metadata canonicalises it
     created = _as_dict(fmt.get("tags")).get("creation_time")
     if isinstance(created, str) and created:
         out["recorded_at"] = created
@@ -86,6 +87,12 @@ class FfprobeMetadataExtractor:
     def __init__(self, tools: FfmpegToolsHolder) -> None:
         self._tools = tools
 
+    @property
+    def available(self) -> bool:
+        """Whether ffprobe is currently located -- when ``False``, :meth:`extract` only ever
+        returns ``{}`` (the metadata enrichment pass skips work it cannot do)."""
+        return self._tools.current.ffprobe_path is not None
+
     def extract(self, path: Path) -> dict[str, Any]:
         ffprobe = self._tools.current.ffprobe_path
         if ffprobe is None:                                  # no ffprobe (yet) -> the frontend fills in
@@ -95,6 +102,7 @@ class FfprobeMetadataExtractor:
                 [str(ffprobe), "-v", "quiet", "-print_format", "json",
                  "-show_format", "-show_streams", str(path)],
                 capture_output=True, text=True, timeout=_PROBE_TIMEOUT, check=False,
+                creationflags=NO_WINDOW,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             _log.warning("ffprobe failed on %s: %s", path, exc)

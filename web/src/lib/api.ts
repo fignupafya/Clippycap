@@ -6,6 +6,7 @@ export interface AssetSummary {
   metadata: Record<string, unknown>; thumbnail_url: string; stream_url: string;
   tag_ids: number[]; note_count: number; reference_count: number; is_new: boolean;
   last_opened_at: string | null;
+  metadata_pending: boolean;   // true until a scan's enrichment phase has read duration / resolution
 }
 export interface AssetPage { items: AssetSummary[]; total: number; offset: number; limit: number; }
 export interface Note {
@@ -42,8 +43,13 @@ export interface PlayerConfig {
   skip_seconds: number; skip_seconds_fine: number;
   pause_on_add_note: boolean; prefer_rvfc: boolean;
 }
+export interface UiConfig {
+  theme: string; accent_color: string; grid_density: string; default_sort: string;
+  locale: string; markdown_in_notes: boolean; page_size: number;
+}
 export interface AppConfig {
   editing: EditingConfig; player: PlayerConfig; keybindings: Record<string, string>;
+  ui: UiConfig;
   [key: string]: unknown;
 }
 export interface FfmpegStatus {
@@ -99,7 +105,6 @@ export const api = {
   listAssets: (q: AssetQuery = {}) => req<AssetPage>('GET', `/api/assets${qs(q as Record<string, unknown>)}`),
   getAsset: (id: number) => req<AssetDetail>('GET', `/api/assets/${id}`),
   markOpened: (id: number) => req<void>('POST', `/api/assets/${id}/opened`),
-  renameAsset: (id: number, title: string) => req<AssetSummary>('PATCH', `/api/assets/${id}`, { title }),
   deleteAsset: (id: number, deleteFiles = false) =>
     req<void>('DELETE', `/api/assets/${id}${deleteFiles ? '?delete_files=true' : ''}`),
   renameFile: (id: number, name: string) => req<{ id: number; title: string }>('POST', `/api/assets/${id}/rename-file`, { name }),
@@ -151,5 +156,8 @@ export const api = {
   listSources: () => req<Source[]>('GET', '/api/sources'),
   addSource: (path: string) => req<Source>('POST', '/api/sources', { path, recursive: true, media_types: [] }),
   scanAll: () => req<{ job_id: string }>('POST', '/api/scan'),
+  // Fast, hashing-free re-sync: pick up files renamed / moved / deleted outside the app.
+  reconcile: () => req<{ changed: boolean; renamed: number; vanished: number; restored: number }>('POST', '/api/reconcile'),
   getJob: (id: string) => req<Job>('GET', `/api/jobs/${id}`),
+  listJobs: () => req<Job[]>('GET', '/api/jobs'),
 };

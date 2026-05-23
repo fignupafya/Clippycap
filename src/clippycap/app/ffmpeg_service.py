@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,7 @@ class FfmpegService:
         jobs: JobQueue,
         data_dir: Path,
         install_dir: Path,
+        on_tools_changed: Callable[[], object] | None = None,
     ) -> None:
         self._tools = tools_holder
         self._config_holder = config_holder
@@ -68,6 +70,9 @@ class FfmpegService:
         self._data_dir = data_dir
         self._install_dir = install_dir
         self._install_job_id: str | None = None
+        # Invoked whenever the resolved ffmpeg/ffprobe tools change (install / use_path / use_auto)
+        # -- wired to the metadata enrichment pass so clips unprobeable before now get finished.
+        self._on_tools_changed = on_tools_changed
 
     # ---- queries ---------------------------------------------------------
 
@@ -175,6 +180,7 @@ class FfmpegService:
             )
         reporter.update(0, None, f"ffmpeg installed at {new_tools.ffmpeg_path}")
         _log.info("on-demand ffmpeg install complete: %s", new_tools.ffmpeg_path)
+        self._tools_changed()
 
     def _persist_ffmpeg(self, changes: dict[str, Any]) -> None:
         current = self._config_holder.current.media.ffmpeg
@@ -190,3 +196,10 @@ class FfmpegService:
         except ConfigError as exc:
             raise InvalidInputError(f"Could not apply the ffmpeg setting: {exc}") from exc
         self._tools.current = resolve_ffmpeg_tools(self._config_holder.current, self._install_dir)
+        self._tools_changed()
+
+    def _tools_changed(self) -> None:
+        """Notify the app that the resolved ffmpeg/ffprobe tools changed, so the metadata
+        enrichment pass can finish any clips it could not probe before."""
+        if self._on_tools_changed is not None:
+            self._on_tools_changed()

@@ -13,13 +13,21 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
-from clippycap.core.entities import Asset, Reference
+from clippycap.core.entities import Asset, Note, Reference
 from clippycap.core.errors import ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.events import AssetUpdated, EventBus
-from clippycap.core.ports import Database, IdentityStrategy, MediaTypeProvider, UnitOfWork, VideoEditor
+from clippycap.core.ports import (
+    Database,
+    IdentityStrategy,
+    KeptSegment,
+    MediaTypeProvider,
+    UnitOfWork,
+    VideoEditor,
+)
 from clippycap.infra.config import Config, ConfigHolder
 from clippycap.infra.media.video_thumbnail import purge_asset_thumbnails
 
@@ -78,10 +86,15 @@ class EditingService:
             source_path = self._on_disk_path(uow, asset_id)
             provider = self._provider(asset.media_type)
             out_path = self._unused_name(source_path, start_ms, end_ms)
-            if not self._editor.keep_range(source_path, out_path, start_ms=start_ms, end_ms=end_ms):
+            segments = self._editor.keep_range(source_path, out_path, start_ms=start_ms, end_ms=end_ms)
+            if segments is None:
                 out_path.unlink(missing_ok=True)
                 raise UnsupportedError("the video edit failed -- see the logs")
-            new_asset = self._register_file(uow, out_path, asset.media_type, provider)
+            new_asset, created = self._register_file(uow, out_path, asset.media_type, provider)
+            if created and new_asset.id is not None:
+                self._copy_notes_into_extract(
+                    uow, source_id=asset_id, new_id=new_asset.id, segments=segments
+                )
             self._link_excerpt(uow, new_asset, asset, start_ms)
         if remove_from_source:
             self.remove_segment(asset_id, start_ms=start_ms, end_ms=end_ms)
@@ -146,16 +159,12 @@ class EditingService:
             asset = self._get(uow, asset_id)
             path = self._on_disk_path(uow, asset_id)
             provider = self._provider(asset.media_type)
-            # What source-time range the result will actually cover (the cut snaps to a frame /
-            # keyframe), so notes are shifted by the real amount instead of the requested one.
-            if mode == "keep":
-                eff_start = self._editor.resolve_cut_start(path, start_ms)
-                note_lo, note_hi = eff_start, eff_start + (end_ms - start_ms)
-            else:
-                note_lo, note_hi = start_ms, self._editor.resolve_cut_start(path, end_ms)
             tmp = path.with_name(f"{path.stem}{_TMP_SUFFIX}{path.suffix}")
-            edit = self._editor.keep_range if mode == "keep" else self._editor.remove_range
-            if not edit(path, tmp, start_ms=start_ms, end_ms=end_ms):
+            cut = self._editor.keep_range if mode == "keep" else self._editor.remove_range
+            # The editor returns the *measured* kept segments of the result, so notes and references
+            # remap onto the new timeline frame-exactly instead of being shifted by an estimate.
+            segments = cut(path, tmp, start_ms=start_ms, end_ms=end_ms)
+            if segments is None:
                 tmp.unlink(missing_ok=True)
                 raise UnsupportedError("the video edit failed -- see the logs")
             # Identify the result *before* touching the original, so a collision leaves the file intact.
@@ -175,7 +184,8 @@ class EditingService:
                     raise UnsupportedError(f"couldn't write the pre-edit backup copy: {exc}") from exc
             self._replace_locked(tmp, path)
             self._refresh_file(uow, asset, path, provider, identity_hash=new_hash)
-            self._shift_notes(uow, asset_id, note_lo, note_hi, mode)
+            self._remap_notes(uow, asset_id, segments)
+            self._remap_references(uow, asset_id, segments)
         self._bus.publish(AssetUpdated(asset_id=asset_id))
         with self._db.transaction() as uow:
             refreshed = uow.assets.get(asset_id)
@@ -189,6 +199,8 @@ class EditingService:
         asset.identity_hash = identity_hash
         asset.size_bytes = st.st_size
         asset.metadata = {**asset.metadata, **provider.extract_metadata(path)}
+        # metadata was just re-read with the tool available; leave it pending only if it could not be.
+        asset.metadata_pending = not provider.metadata_extraction_available
         uow.assets.update(asset)                                          # update() now also writes identity_hash
         uow.hash_cache.put(str(path), st.st_size, st.st_mtime_ns, identity_hash)  # so re-scans stay consistent
         if asset.id is not None:
@@ -196,38 +208,62 @@ class EditingService:
             provider.make_thumbnail(path, self._thumb_dir / f"{asset.id}.{self._config.thumbnails.format}",
                                     metadata=asset.metadata)
 
-    def _shift_notes(self, uow: UnitOfWork, asset_id: int, lo: int, hi: int, mode: _EditMode) -> None:
-        # (lo, hi) in source-time: for "keep" the range the trimmed clip covers; for "remove" the
-        # range that was removed (the head ends at lo, the tail resumes at hi).
-        gap = hi - lo
+    @staticmethod
+    def _remap_span(
+        start_ms: int, end_ms: int, segments: Sequence[KeptSegment]
+    ) -> tuple[int, int] | None:
+        """Where the source span ``[start_ms, end_ms]`` lands in an edited clip described by
+        ``segments``. Each kept segment contributes its overlap; since the segments are concatenated
+        in the output the surviving pieces are contiguous there, so the result is the min/max output
+        position. ``None`` means the whole span was cut away. A point is just ``start == end``."""
+        lo: int | None = None
+        hi: int | None = None
+        for seg in segments:
+            overlap_start = max(start_ms, seg.source_start_ms)
+            overlap_end = min(end_ms, seg.source_end_ms)
+            if overlap_start <= overlap_end:
+                out_lo = seg.output_start_ms + (overlap_start - seg.source_start_ms)
+                out_hi = seg.output_start_ms + (overlap_end - seg.source_start_ms)
+                lo = out_lo if lo is None else min(lo, out_lo)
+                hi = out_hi if hi is None else max(hi, out_hi)
+        return None if lo is None or hi is None else (lo, hi)
+
+    def _remap_notes(self, uow: UnitOfWork, asset_id: int, segments: Sequence[KeptSegment]) -> None:
+        """Move each timestamped note of an edited clip onto the new timeline; delete a note whose
+        moment was cut away. The general note has no timeline position -- it is left untouched."""
         for note in uow.notes.list_for_asset(asset_id):
             if note.timestamp_ms is None or note.id is None:
                 continue
-            if mode == "keep":
-                if not (lo <= note.timestamp_ms <= hi):
-                    uow.notes.delete(note.id)
-                    continue
-                new_start = note.timestamp_ms - lo
-                new_end: int | None = None
-                if note.end_timestamp_ms is not None:
-                    new_end = min(note.end_timestamp_ms, hi) - lo
-                    if new_end <= new_start:
-                        new_end = None
-                uow.notes.retime(note.id, new_start, new_end)
-            else:  # "remove": [lo, hi) is gone
-                if lo <= note.timestamp_ms < hi:
-                    uow.notes.delete(note.id)
-                    continue
-                new_start = note.timestamp_ms if note.timestamp_ms < lo else note.timestamp_ms - gap
-                new_end = note.end_timestamp_ms
-                if new_end is not None:
-                    if new_end > hi:
-                        new_end -= gap
-                    elif new_end > lo:
-                        new_end = lo                    # the interval's tail fell in the cut -- clamp to it
-                    if new_end <= new_start:
-                        new_end = None
-                uow.notes.retime(note.id, new_start, new_end)
+            end = note.end_timestamp_ms if note.end_timestamp_ms is not None else note.timestamp_ms
+            remapped = self._remap_span(note.timestamp_ms, end, segments)
+            if remapped is None:
+                uow.notes.delete(note.id)
+            else:
+                new_start, new_end = remapped
+                is_interval = note.end_timestamp_ms is not None and new_end > new_start
+                uow.notes.retime(note.id, new_start, new_end if is_interval else None)
+
+    def _remap_references(self, uow: UnitOfWork, asset_id: int, segments: Sequence[KeptSegment]) -> None:
+        """Remap references pinned to a *moment* of the edited clip -- ``from_timestamp_ms`` on its
+        outgoing references, ``to_timestamp_ms`` on its incoming ones. If the moment was cut away the
+        pin is dropped (set to ``None``); the reference itself is always kept."""
+        changed: list[Reference] = []
+        for ref in uow.references.list_outgoing(asset_id):
+            if ref.from_timestamp_ms is not None:
+                remapped = self._remap_span(ref.from_timestamp_ms, ref.from_timestamp_ms, segments)
+                moved = remapped[0] if remapped is not None else None
+                if moved != ref.from_timestamp_ms:
+                    ref.from_timestamp_ms = moved
+                    changed.append(ref)
+        for ref in uow.references.list_incoming(asset_id):
+            if ref.to_timestamp_ms is not None:
+                remapped = self._remap_span(ref.to_timestamp_ms, ref.to_timestamp_ms, segments)
+                moved = remapped[0] if remapped is not None else None
+                if moved != ref.to_timestamp_ms:
+                    ref.to_timestamp_ms = moved
+                    changed.append(ref)
+        for ref in changed:
+            uow.references.update(ref)
 
     def _unused_name(self, source: Path, start_ms: int, end_ms: int) -> Path:
         def mmss(ms: int) -> str:
@@ -248,24 +284,52 @@ class EditingService:
 
     def _register_file(
         self, uow: UnitOfWork, path: Path, media_type: str, provider: MediaTypeProvider
-    ) -> Asset:
+    ) -> tuple[Asset, bool]:
+        """Register a freshly-written file as an asset. Returns ``(asset, created)`` -- ``created``
+        is ``False`` when the file is byte-identical to one already in the library (deduped)."""
         st = path.stat()
         identity_hash = self._strategy(provider.identity_strategy_name).compute(path, st.st_size)
         existing = uow.assets.get_by_hash(identity_hash)
         if existing is not None and existing.id is not None:
             uow.assets.upsert_path(existing.id, str(path), None)
-            return existing
+            return existing, False
         metadata = provider.extract_metadata(path)
         asset = uow.assets.add(Asset(
             identity_hash=identity_hash, media_type=media_type,
             title=provider.display_title(path, metadata), size_bytes=st.st_size, metadata=metadata,
+            # the new clip's metadata was just read; only pending if the extractor was unavailable.
+            metadata_pending=not provider.metadata_extraction_available,
         ))
         assert asset.id is not None
         uow.assets.upsert_path(asset.id, str(path), None)
         uow.hash_cache.put(str(path), st.st_size, st.st_mtime_ns, identity_hash)
         provider.make_thumbnail(path, self._thumb_dir / f"{asset.id}.{self._config.thumbnails.format}",
                                 metadata=metadata)
-        return asset
+        return asset, True
+
+    def _copy_notes_into_extract(
+        self, uow: UnitOfWork, *, source_id: int, new_id: int, segments: Sequence[KeptSegment]
+    ) -> None:
+        """Give a freshly-extracted clip a copy of the source's general note and of every
+        timestamped note whose moment falls inside the extracted range (remapped, tags carried)."""
+        for note in uow.notes.list_for_asset(source_id):
+            if note.timestamp_ms is None:
+                uow.notes.add(Note(asset_id=new_id, body=note.body))           # the general note
+                continue
+            end = note.end_timestamp_ms if note.end_timestamp_ms is not None else note.timestamp_ms
+            remapped = self._remap_span(note.timestamp_ms, end, segments)
+            if remapped is None:
+                continue                                                       # outside the extracted range
+            new_start, new_end = remapped
+            is_interval = note.end_timestamp_ms is not None and new_end > new_start
+            copy = uow.notes.add(Note(
+                asset_id=new_id, body=note.body, timestamp_ms=new_start,
+                end_timestamp_ms=new_end if is_interval else None,
+            ))
+            if note.id is not None and copy.id is not None:
+                tag_ids = uow.notes.tag_ids_for_note(note.id)
+                if tag_ids:
+                    uow.notes.set_tags(copy.id, tag_ids)
 
     def _link_excerpt(self, uow: UnitOfWork, child: Asset, parent: Asset, source_start_ms: int) -> None:
         label = self._config.editing.excerpt_reference_type     # a plain description now, not a reference type

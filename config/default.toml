@@ -44,6 +44,9 @@ grid_density      = "medium"      # "small" | "medium" | "large"
 default_sort      = "recorded_desc"   # see [sort] for the available keys
 locale            = "en"
 markdown_in_notes = true
+# How many clips one page of the library grid shows. The grid is paginated so it stays fast no
+# matter how large the library grows -- only this many cards (and thumbnails) are ever in the DOM.
+page_size         = 100           # 1..500
 
 [scan]
 recursive_default       = true    # default 'recursive' for newly added sources
@@ -56,13 +59,24 @@ skip_modified_within_seconds = 15
 scan_on_startup         = true
 # Re-scan interval in minutes while running; 0 = only on demand / startup.
 periodic_scan_minutes   = 0
+# A scan works in two phases -- discovery (find + identify files) then enrichment (read each clip's
+# duration / resolution). It commits, and so the new clips appear in the library grid, every this
+# many files instead of only once at the very end -- so a large first scan streams in progressively
+# and stays usable throughout. Smaller = smoother updates + more commits; larger = fewer commits. 1..10000.
+commit_batch_size       = 32
 
 [identity]
-# Which IdentityStrategy to use. Built-in: "blake3" (a full BLAKE3 content hash; combined with the
-# (path, size, mtime) cache, re-scanning unchanged files re-hashes nothing). Plugins may register
-# more (e.g. "perceptual_video" -- robust to re-encoding/trimming).
-strategy                = "blake3"
-# Reserved for a future "composite" strategy (cheap partial head/tail hash -> full-hash confirm).
+# Which IdentityStrategy to use. Built-in:
+#   "blake3-composite" (default) -- identity = BLAKE3 over the file's exact byte size plus its first
+#     `partial_hash_head_bytes` and last `partial_hash_tail_bytes`. Reads only ~128 KB per file
+#     instead of every byte, so the first scan of a large library is many times faster; for real
+#     video files it is as collision-free as a whole-file hash.
+#   "blake3" -- a full-content BLAKE3 hash (reads every byte): slower to scan, an absolute whole-file
+#     content hash. Switching strategy re-identifies the existing library once, in the background.
+# Plugins may register more (e.g. "perceptual_video" -- robust to re-encoding/trimming).
+strategy                = "blake3-composite"
+# Bytes read from the start and end of each file by the "blake3-composite" strategy. The file's
+# exact size is always hashed in too, so two files collide only if their size AND both ends match.
 partial_hash_head_bytes = 65536
 partial_hash_tail_bytes = 65536
 # Use the NTFS volume + file id (when available) to avoid counting the same file twice
@@ -108,7 +122,7 @@ recorded_at_filename_patterns = [
   "%Y%m%d_%H%M%S",
   "%Y%m%d-%H%M%S",
 ]
-identity_strategy = "blake3"      # may differ from the global default per media type
+identity_strategy = "blake3-composite"   # may differ from the global default per media type
 
 [player]
 # Available playback speeds shown in the player UI.

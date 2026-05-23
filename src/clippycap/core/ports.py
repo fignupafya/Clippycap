@@ -38,15 +38,22 @@ class AssetRepository(Protocol):
     def search(
         self, *, filter: AssetFilter, sort_key: str, offset: int, limit: int
     ) -> tuple[list[Asset], int]: ...
+    # ids of assets awaiting metadata enrichment (metadata_pending and reachable on disk).
+    def pending_metadata_ids(self) -> list[int]: ...
+    # ids of assets of `media_type` whose identity_hash was NOT produced by the current strategy
+    # (its hash does not start with `current_prefix`) -- i.e. they need re-identifying.
+    def asset_ids_with_foreign_identity(self, media_type: str, current_prefix: str) -> list[int]: ...
     def touch_seen(self, asset_id: int) -> None: ...
     def touch_opened(self, asset_id: int) -> None: ...
     def set_missing(self, asset_id: int, missing: bool) -> None: ...
     # paths
     def add_path(self, path: AssetPath) -> AssetPath: ...
     def get_paths(self, asset_id: int) -> list[AssetPath]: ...
+    def all_paths(self) -> list[AssetPath]: ...
     def find_by_path(self, path: str) -> Asset | None: ...
     def upsert_path(self, asset_id: int, path: str, volume_id: str | None) -> None: ...
     def rename_path(self, old_path: str, new_path: str) -> None: ...
+    def set_path_present(self, path_id: int, present: bool) -> None: ...
     def reconcile_paths_under(self, root: str, seen_paths: Iterable[str]) -> list[int]: ...
     def all_paths_absent(self, asset_id: int) -> bool: ...
 
@@ -128,6 +135,9 @@ class HashCacheStore(Protocol):
     def get(self, path: str, size: int, mtime_ns: int) -> str | None: ...
     def put(self, path: str, size: int, mtime_ns: int, identity_hash: str) -> None: ...
     def forget(self, path: str) -> None: ...
+    # (size, mtime_ns, identity_hash) for a path, or None -- lets the reconciler recognise a
+    # renamed file by its unchanged size+mtime without re-hashing it.
+    def entry(self, path: str) -> tuple[int, int, str] | None: ...
 
 
 class MetaStore(Protocol):
@@ -169,11 +179,15 @@ class IdentityStrategy(Protocol):
     """Computes the content identity of a file. Implementations are registered by ``name``."""
 
     name: str
+    identity_prefix: str    # the literal every identity it returns starts with, e.g. "b3:"
 
     def compute(self, path: Path, size: int) -> str: ...    # algo-prefixed, e.g. "b3:<hex>"
 
 
 class MetadataExtractor(Protocol):
+    @property
+    def available(self) -> bool: ...    # False => extract() can only return {} (e.g. no ffprobe)
+
     def extract(self, path: Path) -> dict[str, Any]: ...    # media-type-specific; may be {}
 
 
@@ -198,10 +212,30 @@ class MediaTypeProvider(Protocol):
     identity_strategy_name: str
     player_kind: str                                        # frontend hint: "video" | "image" | "audio"
 
+    @property
+    def metadata_extraction_available(self) -> bool: ...    # False => extract_metadata() can't run fully
+
     def detect(self, path: Path) -> bool: ...
+    # quick_metadata: cheap, no subprocess -- used by a scan's discovery phase so clips appear at once.
+    # extract_metadata: the full set (may spawn a tool, e.g. ffprobe) -- used by the enrichment phase.
+    def quick_metadata(self, path: Path) -> dict[str, Any]: ...
     def extract_metadata(self, path: Path) -> dict[str, Any]: ...
     def make_thumbnail(self, path: Path, out_path: Path, *, metadata: Mapping[str, Any]) -> bool: ...
     def display_title(self, path: Path, metadata: Mapping[str, Any]) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class KeptSegment:
+    """One run of source footage that survives an edit, and where it lands in the result.
+
+    An edited clip is its kept segments concatenated in order, so a source moment ``t`` with
+    ``source_start_ms <= t <= source_end_ms`` is found at ``output_start_ms + (t - source_start_ms)``
+    in the result. Times are milliseconds; the boundaries are *measured* from the produced files, so
+    remapping a note / reference onto an edited clip is frame-exact rather than estimated."""
+
+    source_start_ms: int
+    source_end_ms: int
+    output_start_ms: int
 
 
 class VideoEditor(Protocol):
@@ -209,23 +243,25 @@ class VideoEditor(Protocol):
 
     ``available is False`` when no ffmpeg binary is located -- callers must check it first. (It's a
     read-only property: an on-demand ffmpeg install can flip it to ``True`` while the app runs.)
+
+    :meth:`keep_range` / :meth:`remove_range` return the :class:`KeptSegment` tuple describing the
+    result's timeline -- so notes and references can be remapped onto it exactly -- or ``None`` if
+    the edit failed.
     """
 
     @property
     def available(self) -> bool: ...
 
-    def keep_range(self, source: Path, out_path: Path, *, start_ms: int, end_ms: int) -> bool:
+    def keep_range(
+        self, source: Path, out_path: Path, *, start_ms: int, end_ms: int
+    ) -> tuple[KeptSegment, ...] | None:
         """Write ``out_path`` containing only ``source``'s ``[start_ms, end_ms]``."""
         ...
 
-    def remove_range(self, source: Path, out_path: Path, *, start_ms: int, end_ms: int) -> bool:
-        """Write ``out_path`` = ``source`` with ``[start_ms, end_ms]`` cut out (the surrounding parts)."""
-        ...
-
-    def resolve_cut_start(self, source: Path, requested_ms: int) -> int:
-        """The source time (ms) a cut starting at ``requested_ms`` will *actually* begin at (it snaps
-        to a keyframe / frame boundary), so notes can be shifted by the right amount; returns
-        ``requested_ms`` if it cannot be determined."""
+    def remove_range(
+        self, source: Path, out_path: Path, *, start_ms: int, end_ms: int
+    ) -> tuple[KeptSegment, ...] | None:
+        """Write ``out_path`` = ``source`` with ``[start_ms, end_ms]`` cut out (the parts around it)."""
         ...
 
 

@@ -30,7 +30,10 @@ from clippycap.infra.media.ffmpeg import FfmpegToolsHolder, resolve_ffmpeg_tools
 from clippycap.infra.media.video_editor import FfmpegVideoEditor
 from clippycap.infra.media.video_metadata import FfprobeMetadataExtractor
 from clippycap.infra.media.video_thumbnail import FfmpegThumbnailer
-from clippycap.infra.scan.hashing import Blake3IdentityStrategy
+from clippycap.infra.scan.enricher import MetadataEnricher
+from clippycap.infra.scan.hashing import Blake3CompositeIdentityStrategy, Blake3IdentityStrategy
+from clippycap.infra.scan.identity_upgrade import IdentityUpgrader
+from clippycap.infra.scan.reconciler import LibraryReconciler
 from clippycap.infra.scan.scanner import LibraryScanner
 from clippycap.media_types.video.video_media_type import VideoMediaType
 from clippycap.plugins_runtime.context import PluginContext
@@ -138,6 +141,10 @@ def build_application(
     event_bus = InProcessEventBus()
     registries = Registries()
     registries.identity_strategies.register("blake3", Blake3IdentityStrategy())
+    registries.identity_strategies.register("blake3-composite", Blake3CompositeIdentityStrategy(
+        head_bytes=config.identity.partial_hash_head_bytes,
+        tail_bytes=config.identity.partial_hash_tail_bytes,
+    ))
     registries.media_types.register("video", _build_video_media_type(config, ffmpeg_tools))
 
     plugin_context = PluginContext(
@@ -157,6 +164,14 @@ def build_application(
     jobs = ThreadJobQueue()
 
     config_holder = ConfigHolder(config)
+    reconciler = LibraryReconciler(database, event_bus, config_holder)
+    enricher = MetadataEnricher(database, dict(registries.media_types.items()), event_bus, config)
+    identity_upgrader = IdentityUpgrader(
+        database, list(registries.media_types), dict(registries.identity_strategies.items())
+    )
+    scan_service = ScanService(
+        database, scanner, reconciler, enricher, identity_upgrader, jobs, event_bus
+    )
     video_editor = FfmpegVideoEditor(tools=ffmpeg_tools, config_holder=config_holder)
     editing_service = EditingService(
         database, video_editor, dict(registries.media_types.items()),
@@ -169,6 +184,7 @@ def build_application(
     ffmpeg_service = FfmpegService(
         tools_holder=ffmpeg_tools, config_holder=config_holder, config_service=config_service,
         jobs=jobs, data_dir=data_dir, install_dir=install_dir,
+        on_tools_changed=scan_service.enrich_pending,
     )
 
     return Application(
@@ -177,7 +193,8 @@ def build_application(
         assets=AssetService(database, event_bus, thumbnail_dir), tags=TagService(database, event_bus, tag_images_dir),
         notes=NoteService(database, event_bus), references=ReferenceService(database, event_bus),
         reference_types=ReferenceTypeService(database), sources=SourceService(database, event_bus),
-        saved_views=SavedViewService(database), scans=ScanService(database, scanner, jobs, event_bus),
+        saved_views=SavedViewService(database),
+        scans=scan_service,
         editing=editing_service, config_service=config_service, ffmpeg=ffmpeg_service,
         loaded_plugins=loaded_plugins, data_dir=data_dir, thumbnail_dir=thumbnail_dir,
         tag_images_dir=tag_images_dir, install_dir=install_dir,

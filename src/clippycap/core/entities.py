@@ -22,6 +22,9 @@ class Asset:
     title: str                               # display name; defaults from the file name, user-editable
     size_bytes: int
     metadata: dict[str, Any] = field(default_factory=dict)   # media-type-specific (duration, fps, ...)
+    # True between a scan's discovery phase (which records the asset) and its enrichment phase
+    # (which reads the clip's duration / resolution into `metadata`); False once enriched.
+    metadata_pending: bool = False
     added_at: datetime | None = None
     last_seen_at: datetime | None = None
     last_opened_at: datetime | None = None   # None => "new" (never opened in the app)

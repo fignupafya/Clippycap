@@ -1,25 +1,32 @@
-"""The library scanner: discovers media under a source and assigns/refreshes assets by content hash.
+"""The library scanner -- the *discovery* phase of a scan.
 
-One scan == one database transaction. Per file: pick a media-type provider that recognises it; skip
+It walks a source folder and, per file: picks a media-type provider that recognises it; skips
 zero-byte files and files modified within the configured window (they may still be being written);
-look the content hash up in the cache or compute it; find or create the asset; record the path.
-Afterwards: paths under this source not seen this scan are marked absent, and assets with no present
-path become *missing* (never deleted); a re-found asset has its *missing* flag cleared. Per-asset
-events (:class:`~clippycap.core.events.AssetAdded`, :class:`~clippycap.core.events.AssetMissing`) are
-published; the surrounding ``ScanStarted`` / ``ScanCompleted`` events carry a scan id and are
-published by the application layer.
+looks the content identity up in the cache or computes it; finds or creates the asset; records the
+path. A newly created asset is marked ``metadata_pending`` -- its duration / resolution are read
+afterwards, off the critical path, by the :class:`~clippycap.infra.scan.enricher.MetadataEnricher`.
+
+The scan commits every ``[scan].commit_batch_size`` files instead of once at the very end, so a
+large first scan streams progressively into the library grid and the app stays usable throughout.
+After every file is walked, paths under the source no longer on disk are marked absent and assets
+with no present path become *missing* (never deleted); a re-found asset has its *missing* flag
+cleared.
+
+Per-asset events (:class:`AssetAdded`, :class:`AssetMissing`) are published *after* the batch that
+produced them commits, so a subscriber never sees an asset a rollback then discarded. The
+surrounding ``ScanStarted`` / ``ScanCompleted`` events are published by the application layer.
 """
 
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from clippycap.core.entities import Asset, Source
-from clippycap.core.events import AssetAdded, AssetMissing, EventBus
+from clippycap.core.events import AssetAdded, AssetMissing, Event, EventBus
 from clippycap.core.ports import (
     Database,
     IdentityStrategy,
@@ -48,6 +55,11 @@ def _volume_id(path: Path) -> str | None:
         return None
 
 
+def _chunks(items: list[Path], size: int) -> Iterator[list[Path]]:
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
+
+
 class LibraryScanner:
     def __init__(
         self,
@@ -73,27 +85,34 @@ class LibraryScanner:
                 return None
         return None
 
-    def _metadata(self, provider: MediaTypeProvider, file: Path) -> dict[str, Any]:
+    @staticmethod
+    def _quick_metadata(provider: MediaTypeProvider, file: Path) -> dict[str, Any]:
+        """The cheap, no-subprocess metadata recorded at discovery (a video's recorded_at). The
+        full set -- duration, resolution -- is read later by the enrichment phase."""
         try:
-            return provider.extract_metadata(file)
-        except Exception:
+            return provider.quick_metadata(file)
+        except Exception:        # a misbehaving provider must not abort the scan
             return {}
 
     def _process_file(
-        self, uow: UnitOfWork, file: Path, wanted: set[str], now: float, result: ScanResult
-    ) -> str | None:
+        self, uow: UnitOfWork, file: Path, wanted: set[str], now: float,
+        result: ScanResult, seen_paths: list[str], events: list[Event],
+    ) -> None:
+        """Discover one file: identify it, find or create its asset, record its path. Appends the
+        file's path to ``seen_paths`` and any domain event to ``events`` (published post-commit)."""
         provider = self._detect(file)
         if provider is None or (wanted and provider.media_type not in wanted):
-            return None
+            return
         try:
             st = file.stat()
         except OSError as exc:
             result.errors.append(f"{file}: {exc}")
-            return None
+            return
         if st.st_size == 0 or now - st.st_mtime < self._scan.skip_modified_within_seconds:
-            return None
+            return
         result.files_seen += 1
         path_str = str(file)
+        seen_paths.append(path_str)             # the file is confirmed on disk -> it counts as "seen"
         identity = uow.hash_cache.get(path_str, st.st_size, st.st_mtime_ns)
         if identity is None:
             strategy = self._strategies.get(provider.identity_strategy_name)
@@ -101,24 +120,26 @@ class LibraryScanner:
                 result.errors.append(
                     f"{file}: unknown identity strategy {provider.identity_strategy_name!r}"
                 )
-                return None
+                return
             try:
                 identity = strategy.compute(file, st.st_size)
             except OSError as exc:
                 result.errors.append(f"{file}: {exc}")
-                return None
+                return
             uow.hash_cache.put(path_str, st.st_size, st.st_mtime_ns, identity)
         vol = _volume_id(file) if self._dedup else None
         existing = uow.assets.get_by_hash(identity)
         if existing is None:
-            metadata = self._metadata(provider, file)
+            # Discovery records the asset with only the cheap metadata (no ffprobe); the enrichment
+            # phase later fills in duration / resolution and clears metadata_pending.
             asset = uow.assets.add(Asset(
                 identity_hash=identity, media_type=provider.media_type,
-                title=provider.display_title(file, metadata), size_bytes=st.st_size, metadata=metadata,
+                title=provider.display_title(file, {}), size_bytes=st.st_size,
+                metadata=self._quick_metadata(provider, file), metadata_pending=True,
             ))
             assert asset.id is not None
             uow.assets.upsert_path(asset.id, path_str, vol)
-            self._bus.publish(
+            events.append(
                 AssetAdded(asset_id=asset.id, identity_hash=identity, media_type=asset.media_type)
             )
             result.added += 1
@@ -128,33 +149,51 @@ class LibraryScanner:
             uow.assets.touch_seen(existing.id)
             uow.assets.set_missing(existing.id, False)
             result.updated += 1
-        return path_str
 
     def scan(self, source: Source, *, report: ProgressReporter | None = None) -> ScanResult:
         if source.id is None:
             raise ValueError("cannot scan an unsaved source")
-        result = ScanResult(source_id=source.id)
+        source_id = source.id
+        result = ScanResult(source_id=source_id)
         root = Path(source.path).resolve()
         wanted = set(source.media_types)            # empty => every media type
-        seen_paths: list[str] = []
+        if report is not None:
+            report.update(0, None, "Finding files…")
+        # Materialise the walk: it lets the scan report a real total, and a fresh transaction is
+        # opened per batch (so an interrupted scan keeps the batches that already committed).
+        files = list(walk_files(
+            root, recursive=source.recursive, follow_symlinks=self._scan.follow_symlinks,
+            include_hidden=self._scan.include_hidden_files, ignored_globs=self._scan.ignored_globs,
+        ))
+        total = len(files)
         now = time.time()
+        seen_paths: list[str] = []
+        if report is not None:
+            report.update(0, total, "Discovering files…")
+        for batch in _chunks(files, self._scan.commit_batch_size):
+            batch_events: list[Event] = []
+            with self._db.transaction() as uow:
+                for file in batch:
+                    self._process_file(uow, file, wanted, now, result, seen_paths, batch_events)
+            for event in batch_events:              # publish only once the batch has committed
+                self._bus.publish(event)
+            if report is not None:
+                report.update(result.files_seen, total, "Discovering files…")
+        self._finalise(root, source_id, seen_paths, result)
+        return result
+
+    def _finalise(
+        self, root: Path, source_id: int, seen_paths: list[str], result: ScanResult
+    ) -> None:
+        """Mark paths under the source not seen this scan absent, flag assets left with no present
+        path as missing, and stamp the source's last-scanned time -- in one final transaction."""
+        missing_events: list[Event] = []
         with self._db.transaction() as uow:
-            for file in walk_files(
-                root,
-                recursive=source.recursive,
-                follow_symlinks=self._scan.follow_symlinks,
-                include_hidden=self._scan.include_hidden_files,
-                ignored_globs=self._scan.ignored_globs,
-            ):
-                path_str = self._process_file(uow, file, wanted, now, result)
-                if path_str is not None:
-                    seen_paths.append(path_str)
-                    if report is not None:
-                        report.update(result.files_seen, None, file.name)
             for asset_id in uow.assets.reconcile_paths_under(str(root), seen_paths):
                 if uow.assets.all_paths_absent(asset_id):
                     uow.assets.set_missing(asset_id, True)
-                    self._bus.publish(AssetMissing(asset_id=asset_id))
+                    missing_events.append(AssetMissing(asset_id=asset_id))
                     result.missing += 1
-            uow.sources.touch_scanned(source.id)
-        return result
+            uow.sources.touch_scanned(source_id)
+        for event in missing_events:
+            self._bus.publish(event)

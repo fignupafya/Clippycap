@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
   import WindowControls from './lib/WindowControls.svelte';
+  import Pager from './lib/Pager.svelte';
   import logoUrl from './assets/clippycap-logo.png';
 
   type Quick = 'all' | 'untagged' | 'new';
@@ -14,6 +15,10 @@
   let savedViews = $state<SavedView[]>([]);
   let assets = $state<AssetSummary[]>([]);
   let total = $state(0);
+  let page = $state(1);                              // 1-based; the library grid is paginated
+  let pageSize = $state(100);                        // overwritten from [ui].page_size once config loads
+  let pageCount = $derived(Math.max(1, Math.ceil(total / pageSize)));
+  let gridScroll = $state<HTMLElement>();            // the scrolling grid pane (reset to top per page)
   let loading = $state(false);
   let error = $state<string | null>(null);
   // in-app dialogs (replace window.confirm / window.prompt) and toasts (replace window.alert)
@@ -51,11 +56,11 @@
   let mention = $state<{ el: HTMLTextAreaElement; queryStart: number; query: string; top: number; left: number; set: (s: string) => void; kind: 'clip' | 'note'; clipId: number | null } | null>(null);
   let mentionPopup = $state<{ id: number; title: string; top: number; left: number; body: string | null; time: number | null } | null>(null);
   let mentionIndex = $state(0);
-  let mentionMatches = $derived(mention ? assets.filter((a) => a.title.toLowerCase().includes(mention.query)).slice(0, 8) : []);
+  let mentionMatches = $derived(mention ? assets.filter((a) => a.title.toLowerCase().includes(mention!.query)).slice(0, 8) : []);
   let mentionNotes = $state<{ clipId: number; list: { id: number; body: string; timestamp_ms: number }[] } | null>(null);
   let mentionNoteMatches = $derived(
     mention?.kind === 'note' && mentionNotes?.clipId === mention.clipId
-      ? mentionNotes.list.filter((n) => n.body.toLowerCase().includes(mention.query)) : []
+      ? mentionNotes.list.filter((n) => n.body.toLowerCase().includes(mention!.query)) : []
   );
   let glowNoteId = $state<number | null>(null);
   let pendingSeekMs = $state<number | null>(null);
@@ -63,7 +68,7 @@
   let generalNoteEl = $state<HTMLTextAreaElement>();
   let editNoteBodyId = $state<number | null>(null);
   let noteBodyDraft = $state('');
-  let scanJob = $state<{ scanned: number } | null>(null);
+  let scanJob = $state<{ scanned: number; total: number | null; message: string } | null>(null);
   let nativeWindow = $state(false);   // true when running inside the pywebview shell -> show our own title bar
   let showTags = $state(false);
   let showKeys = $state(false);
@@ -159,20 +164,49 @@
   function dialogCancel() { const d = dialog; dialog = null; mention = null; if (d) d.done(d.kind === 'prompt' ? null : false); }
   async function loadTags() { try { tags = await api.listTags(); } catch (e) { error = String(e); } }
   async function loadSources() { try { sources = await api.listSources(); } catch (e) { error = String(e); } }
+  // Fetch the current page of the grid. The grid only ever holds `pageSize` cards, so the DOM (and
+  // the thumbnail load) stays bounded however large the library is. Used for plain refreshes too
+  // (after a tag/note/edit change) -- it does NOT scroll; `reloadGrid` is the query/page entry point.
   async function loadAssets() {
     loading = true; error = null;
     try {
-      const page = await api.listAssets({
+      const resp = await api.listAssets({
         tags_all: filterTagIds, untagged: quick === 'untagged', never_opened: quick === 'new',
-        text: appliedText.trim() || undefined, sort, limit: 300,
+        text: appliedText.trim() || undefined, sort,
+        offset: (page - 1) * pageSize, limit: pageSize,
       });
-      assets = page.items; total = page.total;
+      // A deletion can leave `page` past the last page (a query change already resets it to 1).
+      // Clamp and bail -- changing `page` re-triggers the effect, which reloads the valid page.
+      const lastPage = Math.max(1, Math.ceil(resp.total / pageSize));
+      if (page > lastPage) { page = lastPage; return; }
+      assets = resp.items; total = resp.total;
       if (selected.size > 0) {
         const vis = new Set(assets.map((a) => a.id));
         const kept = [...selected].filter((id) => vis.has(id));
         if (kept.length !== selected.size) selected = new Set(kept);
       }
     } catch (e) { error = String(e); } finally { loading = false; }
+  }
+
+  // Load the grid for a query/page change and return the pane to the top (so a new page starts at
+  // its first card). Plain post-mutation refreshes call loadAssets directly and keep the scroll.
+  async function reloadGrid() {
+    await loadAssets();
+    gridScroll?.scrollTo({ top: 0 });
+  }
+
+  // Detect files renamed / moved / deleted outside the app -- a cheap, hashing-free server-side
+  // re-sync. Runs on mount (catches changes made while the app was closed) and whenever the window
+  // regains focus. `reconciling` serialises overlapping triggers; it never blocks or freezes the UI.
+  let reconciling = false;
+  async function reconcileLibrary() {
+    if (reconciling) return;
+    reconciling = true;
+    try {
+      const r = await api.reconcile();
+      if (r.changed) await loadAssets();          // refresh in place -- no scroll jump
+    } catch { /* best-effort; a manual Scan always re-syncs */ }
+    finally { reconciling = false; }
   }
 
   onMount(() => {
@@ -254,13 +288,35 @@
     document.addEventListener('mousedown', onCaptureMouseDown, { capture: true });
     // (no cleanup -- App.svelte is the root component, never unmounts during the app's lifetime)
     void loadTags(); void loadSources();
-    void api.getConfig().then((c) => { cfg = c; }).catch(() => { /* fall back to FALLBACK_KEYS */ });
+    void watchLibraryJobs();   // pick up any scan / enrichment / identity-upgrade job running at startup
+    void api.getConfig().then((c) => {
+      cfg = c;
+      const ps = c.ui?.page_size;
+      if (typeof ps === 'number' && ps >= 1) pageSize = ps;
+    }).catch(() => { /* fall back to FALLBACK_KEYS */ });
     void api.getHealth().then((h) => { editingAvailable = !!h.ffmpeg; }).catch(() => { /* keep true */ });
     void refreshFfmpegStatus(true);   // and prompt to install ffmpeg the first time, if it's missing
     void api.listSavedViews().then((v) => { savedViews = v; }).catch(() => { /* none */ });
     void syncFromHash();   // open the clip in the URL hash, if any
+
+    // Keep the library in sync with the filesystem: once now (files may have changed while the app
+    // was closed), then every time the window regains focus / is un-minimised.
+    void reconcileLibrary();
+    window.addEventListener('focus', () => void reconcileLibrary());
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') void reconcileLibrary();
+    });
   });
-  $effect(() => { void loadAssets(); });
+  // A new query (filter / sort / search) jumps the grid back to page 1. It tracks those four
+  // signals only; `untrack` keeps the `page = 1` write from making this depend on `page` itself,
+  // so paging within a query does not re-trigger it.
+  $effect(() => {
+    void [quick, filterTagIds, appliedText, sort];
+    untrack(() => { page = 1; });
+  });
+  // Reload + scroll-to-top whenever the query or the page changes (deps listed explicitly so the
+  // tracking is robust regardless of the async load).
+  $effect(() => { void [quick, filterTagIds, appliedText, sort, page, pageSize]; void reloadGrid(); });
   $effect(() => { if (videoEl) videoEl.playbackRate = playbackRate; });
   $effect(() => { generalNoteText = detail?.general_note ?? ''; });
   $effect(() => { if (detail) { selIn = null; selOut = null; } });   // a new (or refreshed) asset clears the selection
@@ -272,6 +328,12 @@
   }
   function durationOf(meta: Record<string, unknown>): string {
     return typeof meta['duration_ms'] === 'number' ? fmt(meta['duration_ms'] as number) : '';
+  }
+  // The recording time, shown under the (file-name) title on each card. `recorded_at` is stored as
+  // a canonical 'YYYY-MM-DDTHH:MM:SS' local string, so a plain slice formats it -- no Date parsing.
+  function recordedAt(meta: Record<string, unknown>): string {
+    const ra = meta['recorded_at'];
+    return typeof ra === 'string' && ra.length >= 16 ? ra.slice(0, 16).replace('T', ' ') : '';
   }
   function toggleTagFilter(id: number) {
     quick = 'all';
@@ -401,25 +463,18 @@
     editingTitle = false;
     const t = titleDraft.trim();
     if (!t || t === detail.title) return;
-    try { await api.renameAsset(detail.id, t); await refreshDetail(); await loadAssets(); } catch (e) { toast(String(e), 'error'); }
+    // The clip's name IS its file name -- renaming here renames the file on disk (extension kept).
+    if (videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }   // release the file
+    try {
+      await new Promise<void>((r) => setTimeout(r, 250));   // let the backend close its stream handle
+      await api.renameFile(detail.id, t);
+      await refreshDetail(); await loadAssets();
+    } catch (e) { toast(String(e), 'error'); } finally { videoVersion += 1; }
   }
   async function deleteCurrentClip() {
     if (!detail) return;
     if (!await confirmDialog(`Delete “${detail.title}”?`, { detail: 'This removes the clip AND its file on disk — there is no undo.', okLabel: 'Delete clip', danger: true })) return;
     try { await api.deleteAsset(detail.id, true); closeDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
-  }
-  async function renameFile() {
-    if (!detail) return;
-    const cur = ((detail.paths.find((p) => p.present) ?? detail.paths[0])?.path) ?? '';
-    const base = cur ? (cur.split(/[\\/]/).pop() ?? '') : detail.title;
-    const next = await promptDialog('Rename the file', { value: base, detail: 'The extension is kept.', okLabel: 'Rename' });
-    if (next == null || next.trim() === '' || next.trim() === base) return;
-    if (videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }   // release the file
-    try {
-      await new Promise<void>((r) => setTimeout(r, 250));
-      await api.renameFile(detail.id, next.trim());
-      await refreshDetail(); await loadAssets();
-    } catch (e) { toast(String(e), 'error'); } finally { videoVersion += 1; }
   }
   function gotoSibling(delta: number) {
     if (!detail) return;
@@ -433,18 +488,52 @@
     if (!path) return;
     try { await api.addSource(path); await loadSources(); } catch (e) { toast(String(e), 'error'); }
   }
+  // ---- scanning: a scan runs as a background job -- discovery streams the clips into the grid,
+  // then enrichment fills in their durations. `watchLibraryJobs` polls whatever scan / enrichment /
+  // identity-upgrade job is active and live-refreshes the grid, so the library fills in
+  // progressively while the user already browses. -------------------------------------------------
+  let scanWatching = false;          // at most one watcher loop runs at a time
+  let scanWatchRestart = false;      // a watchLibraryJobs() call arriving mid-loop -> poll once more
+  const SCAN_JOB_RE = /^(scan|enrich|upgrade)/;
+
+  function activeLibraryJob(jobs: Job[]): Job | null {
+    const active = jobs.filter((j) => (j.state === 'running' || j.state === 'pending') && SCAN_JOB_RE.test(j.name));
+    return active.find((j) => j.state === 'running') ?? active[0] ?? null;   // prefer the running one
+  }
+  function scanLabel(j: { scanned: number; total: number | null; message: string }): string {
+    const head = j.message || 'Scanning…';
+    if (j.total && j.total > 0) return `${head} ${j.scanned} / ${j.total}`;
+    return j.scanned > 0 ? `${head} ${j.scanned}` : head;
+  }
+  async function watchLibraryJobs() {
+    if (scanWatching) { scanWatchRestart = true; return; }    // already watching -> ask it to re-poll
+    scanWatching = true;
+    try {
+      do {
+        scanWatchRestart = false;
+        let sawActivity = false;
+        for (;;) {
+          let jobs: Job[];
+          try { jobs = await api.listJobs(); } catch { break; }
+          const job = activeLibraryJob(jobs);
+          if (job === null) break;
+          sawActivity = true;
+          scanJob = { scanned: job.scanned, total: job.total, message: job.message };
+          await loadAssets();                                  // stream clips / durations into the grid
+          await new Promise((r) => setTimeout(r, 900));
+        }
+        scanJob = null;
+        if (sawActivity) { await loadAssets(); await loadTags(); }
+      } while (scanWatchRestart);
+    } finally {
+      scanWatching = false;
+    }
+  }
   function scanAll() {
     void (async () => {
-      try {
-        const { job_id } = await api.scanAll();
-        const tick = async () => {
-          const j = await api.getJob(job_id);
-          if (j.state === 'pending' || j.state === 'running') {
-            scanJob = { scanned: j.scanned }; setTimeout(() => void tick(), 400);
-          } else { scanJob = null; await loadAssets(); await loadTags(); }
-        };
-        await tick();
-      } catch (e) { scanJob = null; toast(String(e), 'error'); }
+      try { await api.scanAll(); }
+      catch (e) { toast(String(e), 'error'); return; }
+      void watchLibraryJobs();
     })();
   }
   // ---- ffmpeg: status / on-demand install / point at an existing build ----
@@ -921,7 +1010,7 @@
       <option value="title_asc">Title</option>
     </select>
     <div class="topbar-fill pywebview-drag-region"></div>
-    <button class="btn sm" onclick={scanAll}>{scanJob ? `Scanning… ${scanJob.scanned}` : 'Scan'}</button>
+    <button class="btn sm" onclick={scanAll} disabled={scanJob !== null}>{scanJob ? scanLabel(scanJob) : 'Scan'}</button>
     <button class="btn sm" onclick={() => (showTags = true)}>Tags</button>
     <button class="btn sm" onclick={openSettings} disabled={!cfg} title="Settings">⚙ Settings</button>
     {#if nativeWindow}<WindowControls />{/if}
@@ -959,6 +1048,7 @@
     </aside>
 
     <main>
+      <div class="lib-scroll" bind:this={gridScroll}>
       {#if error}<div class="err">{error}</div>{/if}
       {#if selected.size > 0}
         <div class="bulkbar">
@@ -971,7 +1061,7 @@
           <button class="btn sm" disabled={bulkBusy} onclick={bulkDelete}>🗑 delete {selected.size}</button>
         </div>
       {/if}
-      <div class="bar"><b>{total}</b> clips{loading ? ' · loading…' : ''}{filterTagIds.length ? ' · filtered by ' + filterTagIds.length + ' tag(s)' : ''}</div>
+      <div class="bar"><b>{total}</b> clips{loading ? ' · loading…' : ''}{filterTagIds.length ? ' · filtered by ' + filterTagIds.length + ' tag(s)' : ''}{pageCount > 1 ? ` · page ${page} / ${pageCount}` : ''}</div>
       <div class="grid">
         {#each assets as a (a.id)}
           <button class="card" class:sel={selected.has(a.id)} onclick={(e) => cardClick(a, e)}>
@@ -980,12 +1070,14 @@
               <span class="film">▶</span>
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
               <span class="selbox" class:on={selected.has(a.id)} onclick={(e) => { e.stopPropagation(); toggleSelect(a); }} title="select (Ctrl-click / Shift-click range)">{selected.has(a.id) ? '✓' : ''}</span>
-              {#if durationOf(a.metadata)}<span class="dur">{durationOf(a.metadata)}</span>{/if}
+              {#if durationOf(a.metadata)}<span class="dur">{durationOf(a.metadata)}</span>
+              {:else if a.metadata_pending}<span class="dur pending" title="reading clip details…">…</span>{/if}
               {#if a.is_new}<span class="badge bnew">new</span>{/if}
               {#if a.note_count}<span class="badge">📝 {a.note_count}</span>{/if}
             </div>
             <div class="cb">
               <div class="ct" title={a.title}>{a.title}</div>
+              {#if recordedAt(a.metadata)}<div class="cdate">{recordedAt(a.metadata)}</div>{/if}
               <div class="tags">
                 {#each a.tag_ids as id (id)}
                   {@const t = tagById.get(id)}
@@ -996,6 +1088,13 @@
           </button>
         {/each}
       </div>
+      {#if assets.length === 0 && !loading}
+        <div class="grid-empty">{total === 0 ? 'No clips yet — add a source folder and Scan.' : 'Nothing on this page.'}</div>
+      {/if}
+      </div>
+      {#if pageCount > 1}
+        <Pager bind:page {pageCount} {total} {pageSize} />
+      {/if}
     </main>
   </div>
 </div>
@@ -1012,7 +1111,7 @@
         <input class="field" style:max-width="320px" bind:value={titleDraft} bind:this={titleInputEl}
                onkeydown={(e) => { if (e.key === 'Enter') saveTitle(); else if (e.key === 'Escape') editingTitle = false; }} onblur={saveTitle} />
       {:else}
-        <button class="otitle" onclick={startEditTitle} title="rename — the displayed title (the file on disk isn't touched)">{d.title} <span class="faint" style:font-size="11px">✎</span></button>
+        <button class="otitle" onclick={startEditTitle} title="rename this clip (renames the file on disk; the extension is kept)">{d.title} <span class="faint" style:font-size="11px">✎</span></button>
       {/if}
       <span class="otop-fill pywebview-drag-region"></span>
       <button class="btn sm" onclick={deleteCurrentClip} title="Delete this clip and its file from disk">🗑 Delete clip</button>
@@ -1199,7 +1298,7 @@
         {#if refs.incoming.length === 0}<span class="faint">nothing references this clip yet.</span>{/if}
         <h4>File</h4>
         {#each d.paths as p (p.path)}<div class="src" class:miss={!p.present} title={p.path}>{p.present ? '✓' : '✗'} {p.path}</div>{/each}
-        <button class="btn sm" style:margin-top="7px" onclick={renameFile}>✎ Rename the file on disk</button>
+        <div class="faint" style:font-size="11px" style:margin-top="6px">Rename via the clip's title above — it renames the file itself.</div>
       </div>
     </div>
   </div>
@@ -1483,20 +1582,25 @@
   .refadd-item { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; padding: 4px 6px; border-radius: 5px; font-size: 12px; color: var(--text); background: transparent; border: none; cursor: pointer; }
   .refadd-item:hover { background: var(--bg-3); }
   .refadd-item img { width: 40px; height: 24px; object-fit: cover; border-radius: 3px; flex: none; background: #11141a; }
-  main { flex: 1; overflow-y: auto; padding: 14px; min-width: 0; }
+  /* main is a flex column: the grid scrolls, the pager is a fixed footer flush at the bottom */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .lib-scroll { flex: 1; overflow-y: auto; padding: 14px; min-height: 0; }
   .bar { color: var(--text-2); margin-bottom: 10px; }
   .err { background: #4a1d1d; border: 1px solid #6b2b2b; border-radius: 7px; padding: 8px 11px; margin-bottom: 10px; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
+  .grid-empty { padding: 48px 0; text-align: center; color: var(--text-3); font-size: 13px; }
   .card { text-align: left; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r); overflow: hidden; transition: .12s; }
   .card:hover { border-color: #3a4350; transform: translateY(-2px); }
   .thumb { position: relative; aspect-ratio: 16/9; background: linear-gradient(135deg, #1c2027, #11141a); display: grid; place-items: center; overflow: hidden; }
   .thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
   .thumb .film { font-size: 28px; color: #39424f; }
   .thumb .dur { position: absolute; right: 6px; bottom: 6px; background: rgba(0,0,0,.72); padding: 1px 5px; border-radius: 4px; font-size: 11px; font-family: ui-monospace, monospace; }
+  .thumb .dur.pending { color: var(--text-3); letter-spacing: 2px; }   /* "…" placeholder until enrichment fills the duration */
   .thumb .badge { position: absolute; left: 6px; bottom: 6px; background: rgba(0,0,0,.66); padding: 1px 6px; border-radius: 5px; font-size: 10.5px; font-weight: 700; }
   .thumb .badge.bnew { top: 6px; bottom: auto; background: var(--amber); color: #0e1116; }
   .cb { padding: 8px 9px; }
   .cb .ct { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cb .cdate { font-size: 11px; color: var(--text-3); margin-top: 1px; }
   .cb .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
   .pill { color: #f7f9fb; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
   .pill .x { font-weight: 800; }
