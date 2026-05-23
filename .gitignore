@@ -52,3 +52,11 @@ packaging/bin/
 # --- packaged executables (output of packaging/build.ps1, placed in the repo root; never committed) ---
 /Clippycap-Portable.exe
 /Clippycap-Setup.exe
+
+# --- tests + 3rd-party plugins ---
+# Tests live locally for development; they're not part of the shipped product or this repo. Plugins
+# is the in-tree placeholder for third-party plugin packages -- the runtime framework
+# (src/clippycap/plugins_runtime/) handles a missing directory cleanly, so we don't ship the
+# empty folder. Both stay ignored so a developer can keep them locally without polluting commits.
+/tests/
+/plugins/
