@@ -955,6 +955,12 @@
     if (typeof el.requestVideoFrameCallback !== 'function') return;
     const onFrame = (_now: number, meta: { mediaTime: number }) => {
       exactFrameTime = meta.mediaTime;
+      // Paused: snap the timeline playhead to the displayed frame's *exact* PTS. ``frameNudge``
+      // adds ~half a frame to ``currentTime`` so a stored-as-integer-ms note still seeks solidly
+      // INTO its frame; using that nudged ``currentTime`` for the playhead would visually push it
+      // ~half a frame past a note marker at the same frame, which looks like the bar is between
+      // two frames. With this snap, white playhead and yellow note marker land on the same pixel.
+      if (videoEl?.paused) curMs = Math.round(meta.mediaTime * 1000);
       el.requestVideoFrameCallback(onFrame);
     };
     el.requestVideoFrameCallback(onFrame);
@@ -1301,7 +1307,15 @@
       <div class="player">
         <video bind:this={videoEl} src={`${d.stream_url}?v=${videoVersion}`} controls
                onpointerdown={deflectVideoFocus} onfocusin={deflectVideoFocus}
-               ontimeupdate={() => { if (videoEl) curMs = Math.floor(videoEl.currentTime * 1000); }}
+               ontimeupdate={() => {
+                 if (!videoEl) return;
+                 // Paused (after a seek or step): use the rvfc-supplied frame PTS so the playhead
+                 // lands on the frame, not the half-frame-nudged ``currentTime``. Playing: just
+                 // follow ``currentTime`` -- it advances smoothly between frames.
+                 curMs = (videoEl.paused && exactFrameTime > 0)
+                   ? Math.round(exactFrameTime * 1000)
+                   : Math.floor(videoEl.currentTime * 1000);
+               }}
                onloadedmetadata={() => { if (videoEl && Number.isFinite(videoEl.duration)) durMs = Math.floor(videoEl.duration * 1000); if (pendingSeekMs != null) { seek(pendingSeekMs); pendingSeekMs = null; } }}></video>
         <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
         <div class="timeline" bind:this={timelineEl} class:dragging onpointerdown={timelinePointerDown} title="Click or drag to seek; drag the IN / OUT handles to adjust">
