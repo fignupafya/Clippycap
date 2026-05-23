@@ -47,10 +47,18 @@ class FfmpegVideoEditor:
     def _codec_args(self) -> list[str]:
         e = self._config_holder.current.editing
         if e.reencode:
-            # passthrough keeps each frame's source timestamp, so the cut's frame timing matches the
-            # original exactly (timestamped notes line up after a trim).
+            # passthrough keeps each frame's source timestamp; ``-bf 0`` disables B-frames so the
+            # encoder has no decode-vs-display reorder delay; the ``setts`` bitstream filters then
+            # rebase the first kept frame to PTS 0 (no leading mp4 edit-list empty-edit). Together
+            # these mean: output's frame 0 IS the first kept source frame, on the byte and the
+            # millisecond -- so the timeline a remapped timestamped note seeks into is the same
+            # one the trim's measurement returned. Without them, libx264 + ``-avoid_negative_ts``
+            # bake in a ~2-frame elst empty edit that shifts notes a couple frames earlier.
             return ["-c:v", "libx264", "-crf", str(e.reencode_crf), "-preset", e.reencode_preset,
-                    "-fps_mode:v", "passthrough", "-c:a", "aac"]
+                    "-fps_mode:v", "passthrough", "-bf", "0",
+                    "-bsf:v", "setts=ts=PTS-STARTPTS:dts=DTS-STARTDTS",
+                    "-c:a", "aac",
+                    "-bsf:a", "setts=ts=PTS-STARTPTS:dts=DTS-STARTDTS"]
         return ["-c", "copy"]
 
     def _seek_in(self, seconds: float) -> list[str]:
