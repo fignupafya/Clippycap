@@ -1,6 +1,6 @@
 # Clippycap
 
-**A local desktop app for organising your own video recordings — tag clips, write notes pinned to exact moments, and cross-reference one clip from another.** Built originally for reviewing gameplay recordings (catching kills, mistakes, moments worth showing someone), with a media-type-agnostic engine underneath so audio, replay files, screenshots, or anything else can plug in later without touching the core.
+**A local desktop app for organising your own video recordings — tag clips, write notes pinned to exact moments, and cross-reference one clip from another.** Built for reviewing gameplay recordings: catching kills, mistakes, moments worth showing someone.
 
 ![Clippycap — library view](docs/screenshots/library.png)
 
@@ -40,7 +40,7 @@ User data — the SQLite library, thumbnails, tag images, logs, `local.toml` —
 
 ## Architecture (one-paragraph version)
 
-Layered / hexagonal: a pure `core/` (entities, value objects, ports — no I/O), a thin `app/` (use-case services), `infra/` (SQLite, FFmpeg adapters, the scanner, identity strategies), an `api/` (FastAPI, which also serves the prebuilt SPA), and `web/` (Svelte 5 + Vite + TypeScript). New media types and features land in `plugins/` and `media_types/` — the core never branches on file extension. Files are identified by **BLAKE3 content hash** with a `(path, size, mtime)` cache so rescans are fast. Configuration is *data*: `config/default.toml` is the single source of all defaults, layered with a per-user `local.toml`; a missing key is a hard error, never a silent fallback. FFmpeg / FFprobe are held through a *mutable* `FfmpegToolsHolder` so installs and path changes take effect with no restart. Full design and the decision log in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
+Layered / hexagonal: a pure `core/` (entities, value objects, ports — no I/O), a thin `app/` (use-case services), `infra/` (SQLite, FFmpeg adapters, the scanner, identity strategies), an `api/` (FastAPI, which also serves the prebuilt SPA), and `web/` (Svelte 5 + Vite + TypeScript). Media-type providers register in `media_types/` and runtime plugins load from configured directories — the core never branches on file extension. Files are identified by **BLAKE3 content hash** (a fast composite variant by default — exact size ‖ head ‖ tail — with a `(path, size, mtime)` cache so rescans skip work). Configuration is *data*: `config/default.toml` is the single source of all defaults, layered with a per-user `local.toml`; a missing key is a hard error, never a silent fallback. FFmpeg / FFprobe are held through a *mutable* `FfmpegToolsHolder` so installs and path changes take effect with no restart. Full design and the decision log in [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 **Stack:** Python 3.13 · FastAPI · SQLite (FTS5) · pywebview + WebView2 · Svelte 5 + Vite + TypeScript · FFmpeg / FFprobe. (Python 3.13 not 3.14 because pywebview's `pythonnet` dep has no 3.14 wheels yet; nothing in the code is 3.14-specific.)
 
@@ -81,7 +81,7 @@ Quality gates:
 .venv\Scripts\python -m mypy src/clippycap
 ```
 
-65 pytest tests pass; ruff + mypy `--strict` clean.
+95 pytest tests pass (1 skipped); ruff + mypy `--strict` clean.
 
 ## License
 
