@@ -162,14 +162,6 @@ class AssetService:
                 return candidate
         return None
 
-    def update_title(self, asset_id: int, title: str) -> Asset:
-        with self._db.transaction() as uow:
-            asset = _require(uow.assets.get(asset_id), "asset", asset_id)
-            asset.title = title
-            uow.assets.update(asset)
-        self._bus.publish(AssetUpdated(asset_id=asset_id))
-        return asset
-
     def rename_file(self, asset_id: int, new_name: str) -> Asset:
         cleaned = new_name.strip().strip(". ")
         if not cleaned or "/" in cleaned or "\\" in cleaned:
@@ -197,6 +189,8 @@ class AssetService:
             uow.assets.rename_path(str(old_path), str(new_path))
             uow.hash_cache.forget(str(old_path))
             uow.hash_cache.put(str(new_path), st.st_size, st.st_mtime_ns, asset.identity_hash)
+            asset.title = new_path.stem                  # the title IS the file name -- keep it in sync
+            uow.assets.update(asset)
         self._bus.publish(AssetUpdated(asset_id=asset_id))
         return asset
 

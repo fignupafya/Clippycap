@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from clippycap.infra.media.ffmpeg import FfmpegToolsHolder
+from clippycap.infra.media.ffmpeg import NO_WINDOW, FfmpegToolsHolder
 
 _log = logging.getLogger(__name__)
 _THUMBNAIL_TIMEOUT = 60
@@ -61,6 +61,7 @@ class FfmpegThumbnailer:
                     [str(ffmpeg), "-y", "-loglevel", "error", "-ss", f"{seek:.3f}", "-i", str(path),
                      "-frames:v", "1", "-an", "-vf", f"scale={self._width}:-1", str(out_path)],
                     capture_output=True, timeout=_THUMBNAIL_TIMEOUT, check=False,
+                    creationflags=NO_WINDOW,
                 )
             except (OSError, subprocess.SubprocessError) as exc:
                 _log.warning("ffmpeg thumbnail failed on %s: %s", path, exc)

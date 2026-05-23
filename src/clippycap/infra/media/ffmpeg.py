@@ -33,6 +33,11 @@ _log = logging.getLogger(__name__)
 _EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
 _VERSION_PROBE_TIMEOUT = 15
 
+# A windowed build (PyInstaller --windowed) has no console; without this, Windows allocates a fresh
+# console *window* for every console child (ffmpeg / ffprobe) and it flashes on screen. Pass it as
+# `creationflags=` to every ffmpeg/ffprobe subprocess call. 0 (a harmless no-op) off Windows.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
 
 @dataclass(frozen=True, slots=True)
 class FfmpegTools:
@@ -70,7 +75,7 @@ def probe_ffmpeg_version(exe: Path) -> str | None:
     try:
         completed = subprocess.run(
             [str(exe), "-version"], capture_output=True, text=True,
-            timeout=_VERSION_PROBE_TIMEOUT, check=False,
+            timeout=_VERSION_PROBE_TIMEOUT, check=False, creationflags=NO_WINDOW,
         )
     except (OSError, subprocess.SubprocessError):
         return None

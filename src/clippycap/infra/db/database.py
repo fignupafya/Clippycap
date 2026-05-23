@@ -73,9 +73,12 @@ class SqliteDatabase:
         conn = _connect(self._path)
         try:
             current = int(conn.execute("PRAGMA user_version").fetchone()[0])
-            for version, sql in MIGRATIONS:
+            for version, step in MIGRATIONS:
                 if version > current:
-                    conn.executescript(sql)
+                    if isinstance(step, str):
+                        conn.executescript(step)        # a schema migration
+                    else:
+                        step(conn)                      # a data migration (Python logic)
                     conn.execute(f"PRAGMA user_version = {version}")
             conn.commit()
         finally:
