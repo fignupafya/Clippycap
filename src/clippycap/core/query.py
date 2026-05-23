@@ -27,3 +27,5 @@ class AssetFilter:
     added_after: datetime | None = None
     only_missing: bool = False                           # the "missing files" view
     never_opened: bool = False                           # the "new" view (last_opened_at IS NULL)
+    # the "folder view" filter -- match assets reachable at this exact folder OR any descendant.
+    path_under: str | None = None

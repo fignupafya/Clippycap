@@ -33,6 +33,7 @@ export interface ReferenceView {
 export interface Source { id: number; path: string; recursive: boolean; enabled: boolean; media_types: string[]; last_scanned_at: string | null; }
 export interface SavedView { id: number; name: string; filter_json: string; sort_key: string; sort_order: number; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }
+export interface Folder { path: string; count: number; }
 export interface Health { name: string; ffmpeg: boolean; media_types: string[]; plugins: string[]; }
 export interface EditingConfig {
   reencode: boolean; reencode_crf: number; reencode_preset: string;
@@ -64,6 +65,7 @@ type EditedAsset = { id: number; title: string };
 interface AssetQuery {
   tags_all?: number[]; tags_any?: number[]; untagged?: boolean; text?: string;
   never_opened?: boolean; only_missing?: boolean; sort?: string; offset?: number; limit?: number;
+  path_under?: string;       // folder filter: clips whose path is this folder or any descendant
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -160,4 +162,13 @@ export const api = {
   reconcile: () => req<{ changed: boolean; renamed: number; vanished: number; restored: number }>('POST', '/api/reconcile'),
   getJob: (id: string) => req<Job>('GET', `/api/jobs/${id}`),
   listJobs: () => req<Job[]>('GET', '/api/jobs'),
+  listFolders: () => req<Folder[]>('GET', '/api/folders'),
+  // Every matching asset id (no pagination) -- powers the bulk-bar "select all matching" link.
+  listAssetIds: (q: AssetQuery = {}) => req<number[]>('GET', `/api/assets/ids${qs(q as Record<string, unknown>)}`),
+  // For each tag id, how many of `ids` have that tag -- pre-fills the bulk-tag modal.
+  assetTagCounts: (ids: number[]) => req<Record<string, number>>('POST', '/api/assets/tag-counts', { ids }),
+  // Bulk tag change. `replace_with` (when set) overrides any add/remove and replaces each asset's
+  // tag set with EXACTLY that. Otherwise add/remove are applied as a diff over existing tags.
+  bulkTags: (ids: number[], ops: { add?: number[]; remove?: number[]; replace_with?: number[] | null }) =>
+    req<{ added: number; removed: number }>('POST', '/api/assets/bulk-tags', { ids, ...ops }),
 };

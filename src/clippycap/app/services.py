@@ -86,6 +86,39 @@ def _require[T](value: T | None, what: str, key: object) -> T:
     return value
 
 
+def _is_path_under(path: str, root: str) -> bool:
+    """True if ``path`` is ``root`` itself or strictly inside it (either separator)."""
+    return path == root or path.startswith(root + "\\") or path.startswith(root + "/")
+
+
+def _compute_folder_counts(paths: Sequence[str], sources: Sequence[str]) -> list[tuple[str, int]]:
+    """Walk every clip's path up to its source root, accumulating a count in each ancestor folder.
+
+    A clip is counted in EVERY folder from its parent dir up to (and including) its source root,
+    so a parent folder's count is the cumulative descendant clip count (clicking that folder
+    surfaces every clip below it). Returns sorted by path so the frontend gets a stable order to
+    build a tree from. Folders below a source that's not currently enabled are skipped.
+    """
+    norm_sources = [str(Path(s).resolve()) for s in sources]
+    # Prefer the deepest matching source root when sources nest (one inside the other).
+    sorted_sources = sorted(norm_sources, key=len, reverse=True)
+    counts: dict[str, int] = {}
+    for raw in paths:
+        src_root = next((s for s in sorted_sources if _is_path_under(raw, s)), None)
+        if src_root is None:
+            continue
+        parent_dir = str(Path(raw).parent)
+        while True:
+            counts[parent_dir] = counts.get(parent_dir, 0) + 1
+            if parent_dir == src_root:
+                break
+            new_parent = str(Path(parent_dir).parent)
+            if new_parent == parent_dir:                  # reached the filesystem root somehow
+                break
+            parent_dir = new_parent
+    return sorted(counts.items())
+
+
 # --------------------------------------------------------------------------- assets
 
 
@@ -220,6 +253,21 @@ class AssetService:
                 Path(file_path).unlink(missing_ok=True)
         self._bus.publish(AssetRemoved(asset_id=asset_id))
 
+    def all_matching_ids(self, *, filter: AssetFilter, sort_key: str = "added_desc") -> list[int]:
+        """Every asset id matching ``filter`` (no pagination). Used by the "select all matching"
+        bulk-bar shortcut so a bulk operation can target clips beyond the current page."""
+        with self._db.transaction() as uow:
+            items, _ = uow.assets.search(filter=filter, sort_key=sort_key, offset=0, limit=10_000_000)
+        return [a.id for a in items if a.id is not None]
+
+    def folder_counts(self) -> list[tuple[str, int]]:
+        """Folders (flat, path-sorted): one entry per folder reachable from a present asset path,
+        each with the cumulative descendant clip count. The frontend assembles a tree from this."""
+        with self._db.transaction() as uow:
+            paths = uow.assets.distinct_present_paths()
+            sources = [s.path for s in uow.sources.list_all() if s.enabled]
+        return _compute_folder_counts(paths, sources)
+
 
 # --------------------------------------------------------------------------- tags
 
@@ -331,6 +379,53 @@ class TagService:
             removed = uow.tags.unapply(asset_id, tag_id)
         if removed:
             self._bus.publish(TagUnapplied(asset_id=asset_id, tag_id=tag_id))
+
+    def bulk_tag_counts(self, asset_ids: Sequence[int]) -> dict[int, int]:
+        """For each tag id, how many of ``asset_ids`` currently have that tag. Drives the bulk-tag
+        modal's per-tag "N of M selected have this" indicator."""
+        with self._db.transaction() as uow:
+            per_asset = uow.tags.tag_ids_for_assets(list(asset_ids))
+        counts: dict[int, int] = {}
+        for tag_ids in per_asset.values():
+            for tid in tag_ids:
+                counts[tid] = counts.get(tid, 0) + 1
+        return counts
+
+    def bulk_apply(
+        self, *, asset_ids: Sequence[int],
+        add: Sequence[int] = (), remove: Sequence[int] = (),
+        replace_with: Sequence[int] | None = None,
+    ) -> dict[str, int]:
+        """Apply a bulk tag change in one transaction. When ``replace_with`` is given each asset's
+        tag set becomes EXACTLY that (any other tags are removed). Otherwise ``add`` / ``remove``
+        are applied as a diff -- tags already present are not re-added, tags not present are not
+        re-removed. Returns the number of links actually created / removed."""
+        added = 0
+        removed = 0
+        with self._db.transaction() as uow:
+            current_tags = uow.tags.tag_ids_for_assets(list(asset_ids))
+            for asset_id in asset_ids:
+                if uow.assets.get(asset_id) is None:
+                    continue
+                current = set(current_tags.get(asset_id, []))
+                if replace_with is not None:
+                    target = set(replace_with)
+                    for tid in current - target:
+                        if uow.tags.unapply(asset_id, tid):
+                            removed += 1
+                    for tid in target - current:
+                        if uow.tags.apply(asset_id, tid):
+                            added += 1
+                else:
+                    for tid in add:
+                        if tid not in current and uow.tags.apply(asset_id, tid):
+                            added += 1
+                            current.add(tid)
+                    for tid in remove:
+                        if tid in current and uow.tags.unapply(asset_id, tid):
+                            removed += 1
+                            current.discard(tid)
+        return {"added": added, "removed": removed}
 
 
 # --------------------------------------------------------------------------- notes

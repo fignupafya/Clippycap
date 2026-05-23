@@ -1,13 +1,44 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Folder, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
   import WindowControls from './lib/WindowControls.svelte';
   import Pager from './lib/Pager.svelte';
   import logoUrl from './assets/clippycap-logo.png';
 
   type Quick = 'all' | 'untagged' | 'new';
   type EditKind = 'trim' | 'remove' | 'extract' | 'cut';
+  interface FolderNode { path: string; name: string; count: number; children: FolderNode[]; }
+
+  // Build a tree from the flat folder list /api/folders returns. Each Folder.path is fully
+  // qualified, so a folder's parent is just the parent path lookup; folders with no parent
+  // in the map become tree roots (typically the configured source roots).
+  function folderBasename(p: string): string {
+    const m = p.match(/[\\/]([^\\/]+)$/);
+    return m ? m[1] : p;
+  }
+  function folderParent(p: string): string | null {
+    const m = p.match(/^(.+)[\\/][^\\/]+$/);
+    return m ? m[1] : null;
+  }
+  function buildFolderTree(flat: Folder[]): FolderNode[] {
+    const map = new Map<string, FolderNode>();
+    for (const { path, count } of flat) {
+      map.set(path, { path, name: folderBasename(path), count, children: [] });
+    }
+    const roots: FolderNode[] = [];
+    for (const node of map.values()) {
+      const p = folderParent(node.path);
+      const parent = p !== null ? map.get(p) : null;
+      if (parent) parent.children.push(node); else roots.push(node);
+    }
+    const sortRec = (arr: FolderNode[]): void => {
+      arr.sort((a, b) => a.path.localeCompare(b.path));
+      arr.forEach((n) => sortRec(n.children));
+    };
+    sortRec(roots);
+    return roots;
+  }
 
   let tags = $state<Tag[]>([]);
   let tagById = $derived(new Map(tags.map((t) => [t.id, t])));
@@ -24,19 +55,33 @@
   // in-app dialogs (replace window.confirm / window.prompt) and toasts (replace window.alert)
   let dialog = $state<{ kind: 'confirm' | 'prompt'; message: string; detail: string; value: string; placeholder: string; okLabel: string; danger: boolean; multiline: boolean; mentions: boolean; done: (r: string | boolean | null) => void } | null>(null);
   let dlgInputEl = $state<HTMLInputElement | HTMLTextAreaElement>();
-  let toasts = $state<{ id: number; text: string; kind: 'info' | 'error' | 'success' }[]>([]);
+  let toasts = $state<{ id: number; text: string; kind: 'info' | 'error' | 'success'; sticky: boolean }[]>([]);
   let toastSeq = 0;
+  const toastTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   let quick = $state<Quick>('all');
   let filterTagIds = $state<number[]>([]);
   let searchText = $state('');
   let appliedText = $state('');
   let sort = $state('recorded_desc');
+  let folders = $state<Folder[]>([]);                       // flat /api/folders response
+  let folderFilter = $state<string | null>(null);            // narrow the grid to clips under this folder
+  let expandedFolders = $state<Set<string>>(new Set());      // which tree nodes are open
+  let folderTree = $derived(buildFolderTree(folders));
   let selected = $state<Set<number>>(new Set());     // selected asset ids (grid multi-select)
   let lastSelectedId = $state<number | null>(null);  // anchor for shift-range select
-  let bulkAddTag = $state('');
-  let bulkRemoveTag = $state('');
   let bulkBusy = $state(false);
+  // bulk-tag modal state (Add/Remove (diff) and Replace (override) modes)
+  let showBulkTagModal = $state(false);
+  let bulkTagMode = $state<'modify' | 'replace'>('modify');
+  let bulkTagSearch = $state('');
+  let bulkTagAdd = $state<Set<number>>(new Set());           // tag ids queued to add (modify mode)
+  let bulkTagRemove = $state<Set<number>>(new Set());        // tag ids queued to remove (modify mode)
+  let bulkTagReplaceSet = $state<Set<number>>(new Set());    // checked tags for Replace mode
+  let bulkTagCounts = $state<Map<number, number>>(new Map()); // tag id -> # of selected that have it
+  let bulkTagModalSize = $state(0);                          // selected.size when the modal opened
+  let filteredBulkTags = $derived(tags.filter((t) => t.name.toLowerCase().includes(bulkTagSearch.toLowerCase())));
+  let canApplyBulkTag = $derived(bulkTagMode === 'replace' || bulkTagAdd.size > 0 || bulkTagRemove.size > 0);
 
   let detail = $state<AssetDetail | null>(null);
   let refs = $state<{ outgoing: ReferenceView[]; incoming: ReferenceView[] }>({ outgoing: [], incoming: [] });
@@ -144,10 +189,30 @@
     return typeof v === 'number' ? v : (fine ? 1 : 5);
   }
 
-  function toast(text: string, kind: 'info' | 'error' | 'success' = 'info') {
+  // An auto-dismissing toast. Returns the id so the caller can replace / re-target it via toastUpdate.
+  function toast(text: string, kind: 'info' | 'error' | 'success' = 'info'): number {
     const id = ++toastSeq;
-    toasts = [...toasts, { id, text, kind }];
-    setTimeout(() => { toasts = toasts.filter((t) => t.id !== id); }, kind === 'error' ? 6000 : 3500);
+    toasts = [...toasts, { id, text, kind, sticky: false }];
+    toastTimers.set(id, setTimeout(() => toastDismiss(id), kind === 'error' ? 6000 : 3500));
+    return id;
+  }
+  // A non-dismissing toast (a small spinner is shown next to its text while the work is in progress);
+  // use toastUpdate() to flip it to a normal success / error toast when the work completes.
+  function toastSticky(text: string, kind: 'info' | 'error' | 'success' = 'info'): number {
+    const id = ++toastSeq;
+    toasts = [...toasts, { id, text, kind, sticky: true }];
+    return id;
+  }
+  function toastUpdate(id: number, text: string, kind: 'info' | 'error' | 'success' = 'info', sticky = false): void {
+    const existing = toastTimers.get(id);
+    if (existing) { clearTimeout(existing); toastTimers.delete(id); }
+    toasts = toasts.map((t) => t.id === id ? { ...t, text, kind, sticky } : t);
+    if (!sticky) toastTimers.set(id, setTimeout(() => toastDismiss(id), kind === 'error' ? 6000 : 3500));
+  }
+  function toastDismiss(id: number): void {
+    const existing = toastTimers.get(id);
+    if (existing) { clearTimeout(existing); toastTimers.delete(id); }
+    toasts = toasts.filter((t) => t.id !== id);
   }
   function confirmDialog(message: string, opts: { detail?: string; okLabel?: string; danger?: boolean } = {}): Promise<boolean> {
     return new Promise<boolean>((res) => {
@@ -164,6 +229,7 @@
   function dialogCancel() { const d = dialog; dialog = null; mention = null; if (d) d.done(d.kind === 'prompt' ? null : false); }
   async function loadTags() { try { tags = await api.listTags(); } catch (e) { error = String(e); } }
   async function loadSources() { try { sources = await api.listSources(); } catch (e) { error = String(e); } }
+  async function loadFolders() { try { folders = await api.listFolders(); } catch { /* best effort */ } }
   // Fetch the current page of the grid. The grid only ever holds `pageSize` cards, so the DOM (and
   // the thumbnail load) stays bounded however large the library is. Used for plain refreshes too
   // (after a tag/note/edit change) -- it does NOT scroll; `reloadGrid` is the query/page entry point.
@@ -173,6 +239,7 @@
       const resp = await api.listAssets({
         tags_all: filterTagIds, untagged: quick === 'untagged', never_opened: quick === 'new',
         text: appliedText.trim() || undefined, sort,
+        path_under: folderFilter ?? undefined,
         offset: (page - 1) * pageSize, limit: pageSize,
       });
       // A deletion can leave `page` past the last page (a query change already resets it to 1).
@@ -287,7 +354,7 @@
     }
     document.addEventListener('mousedown', onCaptureMouseDown, { capture: true });
     // (no cleanup -- App.svelte is the root component, never unmounts during the app's lifetime)
-    void loadTags(); void loadSources();
+    void loadTags(); void loadSources(); void loadFolders();
     void watchLibraryJobs();   // pick up any scan / enrichment / identity-upgrade job running at startup
     void api.getConfig().then((c) => {
       cfg = c;
@@ -311,12 +378,12 @@
   // signals only; `untrack` keeps the `page = 1` write from making this depend on `page` itself,
   // so paging within a query does not re-trigger it.
   $effect(() => {
-    void [quick, filterTagIds, appliedText, sort];
+    void [quick, filterTagIds, appliedText, sort, folderFilter];
     untrack(() => { page = 1; });
   });
   // Reload + scroll-to-top whenever the query or the page changes (deps listed explicitly so the
   // tracking is robust regardless of the async load).
-  $effect(() => { void [quick, filterTagIds, appliedText, sort, page, pageSize]; void reloadGrid(); });
+  $effect(() => { void [quick, filterTagIds, appliedText, sort, page, pageSize, folderFilter]; void reloadGrid(); });
   $effect(() => { if (videoEl) videoEl.playbackRate = playbackRate; });
   $effect(() => { generalNoteText = detail?.general_note ?? ''; });
   $effect(() => { if (detail) { selIn = null; selOut = null; } });   // a new (or refreshed) asset clears the selection
@@ -339,8 +406,27 @@
     quick = 'all';
     filterTagIds = filterTagIds.includes(id) ? filterTagIds.filter((x) => x !== id) : [...filterTagIds, id];
   }
+  function selectFolder(path: string | null) {
+    folderFilter = path;
+    if (path !== null) quick = 'all';                       // a folder + a quick view would conflict
+  }
+  function toggleFolderExpand(path: string) {
+    const next = new Set(expandedFolders);
+    if (next.has(path)) next.delete(path); else next.add(path);
+    expandedFolders = next;
+  }
   function clearSelection() { selected = new Set(); lastSelectedId = null; }
   function selectAllVisible() { selected = new Set(assets.map((a) => a.id)); lastSelectedId = assets.at(-1)?.id ?? null; }
+  async function selectAllMatching() {
+    try {
+      const ids = await api.listAssetIds({
+        tags_all: filterTagIds, untagged: quick === 'untagged', never_opened: quick === 'new',
+        text: appliedText.trim() || undefined, sort, path_under: folderFilter ?? undefined,
+      });
+      selected = new Set(ids);
+      lastSelectedId = ids[ids.length - 1] ?? null;
+    } catch (e) { toast(String(e), 'error'); }
+  }
   function toggleSelect(a: AssetSummary) {
     selected = selected.has(a.id) ? new Set([...selected].filter((x) => x !== a.id)) : new Set([...selected, a.id]);
     lastSelectedId = a.id;
@@ -362,15 +448,80 @@
     const ids = [...selected];
     if (ids.length === 0 || bulkBusy) return;
     bulkBusy = true;
+    const tid = toastSticky(`${label}: ${ids.length} clip${ids.length === 1 ? '' : 's'}…`);
     try {
       const results = await Promise.allSettled(ids.map(fn));
       const failed = results.filter((r) => r.status === 'rejected').length;
       await loadAssets(); await loadTags(); await refreshDetail();
-      toast(failed > 0 ? `${label}: ${ids.length - failed} ok, ${failed} failed` : `${label}: ${ids.length} done`, failed > 0 ? 'error' : 'success');
+      if (failed > 0) toastUpdate(tid, `${label}: ${ids.length - failed} ok, ${failed} failed`, 'error');
+      else toastUpdate(tid, `${label}: ${ids.length} done`, 'success');
     } finally { bulkBusy = false; }
   }
-  function bulkApplyTag(tagId: number) { void bulkRun('apply tag', (id) => api.applyTag(id, tagId)); }
-  function bulkRemoveTagFn(tagId: number) { void bulkRun('remove tag', (id) => api.unapplyTag(id, tagId)); }
+  async function openBulkTagModal() {
+    if (selected.size === 0) return;
+    const ids = [...selected];
+    bulkTagAdd = new Set();
+    bulkTagRemove = new Set();
+    bulkTagReplaceSet = new Set();
+    bulkTagSearch = '';
+    bulkTagMode = 'modify';
+    bulkTagModalSize = ids.length;
+    try {
+      const raw = await api.assetTagCounts(ids);
+      const counts = new Map<number, number>();
+      for (const [k, v] of Object.entries(raw)) counts.set(Number(k), v);
+      bulkTagCounts = counts;
+      // Pre-fill the Replace-mode checkbox set with tags that ALL selected clips already have
+      // -- so opening the modal and hitting Apply with no changes is a no-op (no surprise wipe).
+      bulkTagReplaceSet = new Set(
+        [...counts.entries()].filter(([, c]) => c === ids.length).map(([id]) => id),
+      );
+    } catch (e) { toast(String(e), 'error'); return; }
+    showBulkTagModal = true;
+  }
+  function closeBulkTagModal() { showBulkTagModal = false; }
+  function toggleBulkTagAdd(id: number) {
+    const next = new Set(bulkTagAdd);
+    if (next.has(id)) { next.delete(id); }
+    else {
+      next.add(id);
+      if (bulkTagRemove.has(id)) { const rm = new Set(bulkTagRemove); rm.delete(id); bulkTagRemove = rm; }
+    }
+    bulkTagAdd = next;
+  }
+  function toggleBulkTagRemove(id: number) {
+    const next = new Set(bulkTagRemove);
+    if (next.has(id)) { next.delete(id); }
+    else {
+      next.add(id);
+      if (bulkTagAdd.has(id)) { const ad = new Set(bulkTagAdd); ad.delete(id); bulkTagAdd = ad; }
+    }
+    bulkTagRemove = next;
+  }
+  function toggleBulkTagReplace(id: number, checked: boolean) {
+    const next = new Set(bulkTagReplaceSet);
+    if (checked) next.add(id); else next.delete(id);
+    bulkTagReplaceSet = next;
+  }
+  async function applyBulkTag() {
+    const ids = [...selected];
+    if (ids.length === 0 || bulkBusy) return;
+    bulkBusy = true;
+    const tid = toastSticky(`Applying tag changes to ${ids.length} clip${ids.length === 1 ? '' : 's'}…`);
+    try {
+      const ops = bulkTagMode === 'replace'
+        ? { replace_with: [...bulkTagReplaceSet] }
+        : { add: [...bulkTagAdd], remove: [...bulkTagRemove] };
+      const result = await api.bulkTags(ids, ops);
+      closeBulkTagModal();
+      await loadAssets(); await loadTags(); await refreshDetail();
+      const total = result.added + result.removed;
+      if (total === 0) toastUpdate(tid, 'No tag changes were needed', 'info');
+      else toastUpdate(tid, `Tags updated: +${result.added} added · −${result.removed} removed`, 'success');
+    } catch (e) {
+      toastUpdate(tid, `Tag update failed: ${e}`, 'error');
+    } finally { bulkBusy = false; }
+  }
   async function bulkDelete() {
     const n = selected.size;
     if (n === 0 || !await confirmDialog(`Delete ${n} clip${n === 1 ? '' : 's'}?`, { detail: 'This removes them AND their files on disk — there is no undo.', okLabel: `Delete ${n}`, danger: true })) return;
@@ -523,7 +674,7 @@
           await new Promise((r) => setTimeout(r, 900));
         }
         scanJob = null;
-        if (sawActivity) { await loadAssets(); await loadTags(); }
+        if (sawActivity) { await loadAssets(); await loadTags(); await loadFolders(); }
       } while (scanWatchRestart);
     } finally {
       scanWatching = false;
@@ -885,17 +1036,29 @@
     if (kind === 'remove' && !await confirmDialog(`Cut ${span} out of this clip?`, { detail: 'There is no undo.', okLabel: 'Remove', danger: true })) return;
     if (kind === 'cut' && !await confirmDialog(`Save ${span} as a new clip AND cut it out of this one?`, { detail: 'The cut has no undo.', okLabel: 'Cut to new clip', danger: true })) return;
     busy = true;
+    const labels: Record<EditKind, [string, string, string]> = {
+      trim:    ['Trimming…',             'Trimmed',             'Trim failed'],
+      remove:  ['Removing segment…',     'Segment removed',     'Remove failed'],
+      extract: ['Saving as a new clip…', 'Saved as a new clip', 'Save failed'],
+      cut:     ['Cutting to a new clip…','Cut to a new clip',   'Cut failed'],
+    };
+    const [progressLabel, doneLabel, failLabel] = labels[kind];
+    const tid = toastSticky(progressLabel);
     const touchesSource = kind !== 'extract';                          // 'extract' only writes a new file
     if (touchesSource && videoEl) { videoEl.pause(); videoEl.removeAttribute('src'); videoEl.load(); }  // release the file
     try {
       if (touchesSource) await new Promise<void>((r) => setTimeout(r, 250));   // let the backend close its stream handle
+      let madeTitle = '';
       if (kind === 'trim') await api.trimAsset(id, s, o);
       else if (kind === 'remove') await api.removeSegment(id, s, o);
-      else { const made = await api.extractSegment(id, s, o, kind === 'cut'); toast(`Saved as a new clip: ${made.title}`, 'success'); }
+      else { const made = await api.extractSegment(id, s, o, kind === 'cut'); madeTitle = made.title; }
+      toastUpdate(tid, madeTitle ? `${doneLabel}: ${madeTitle}` : doneLabel, 'success');
       clearSel();
       await refreshDetail();
       await loadAssets();
-    } catch (e) { toast(String(e), 'error'); } finally { videoVersion += 1; busy = false; }
+    } catch (e) {
+      toastUpdate(tid, `${failLabel}: ${e}`, 'error');
+    } finally { videoVersion += 1; busy = false; }
   }
 
   function openSettings() {
@@ -1033,6 +1196,14 @@
         {/each}
       {/if}
       <button class="btn sm" style:margin-top="6px" onclick={saveCurrentView} title="save the current filter / search as a view">💾 Save current view</button>
+      {#if folderTree.length > 0}
+        <div class="sec-title">Folders {#if folderFilter}<button class="sec-clear" onclick={() => selectFolder(null)} title="back to all clips">× clear</button>{/if}</div>
+        <div class="folder-tree">
+          {#each folderTree as f (f.path)}
+            {@render folderNode(f, 0)}
+          {/each}
+        </div>
+      {/if}
       <div class="sec-title">Tags</div>
       <div class="tagcloud">
         {#each tags as t (t.id)}
@@ -1053,12 +1224,20 @@
       {#if selected.size > 0}
         <div class="bulkbar">
           <b>{selected.size}</b> selected
-          <button class="btn sm" onclick={selectAllVisible}>all ({assets.length})</button>
+          <button class="btn sm" onclick={selectAllVisible}>all visible ({assets.length})</button>
+          {#if total > assets.length && selected.size < total}<button class="btn sm" onclick={selectAllMatching}>all {total} matching</button>{/if}
           <button class="btn sm" onclick={clearSelection}>clear</button>
           <span style:flex="1"></span>
-          <label>+ tag <select bind:value={bulkAddTag} disabled={bulkBusy} onchange={() => { if (bulkAddTag) { bulkApplyTag(Number(bulkAddTag)); bulkAddTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{@render tagFace(t)} {t.name}</option>{/each}</select></label>
-          <label>− tag <select bind:value={bulkRemoveTag} disabled={bulkBusy} onchange={() => { if (bulkRemoveTag) { bulkRemoveTagFn(Number(bulkRemoveTag)); bulkRemoveTag = ''; } }}><option value="">—</option>{#each tags as t (t.id)}<option value={t.id}>{@render tagFace(t)} {t.name}</option>{/each}</select></label>
+          <button class="btn sm" disabled={bulkBusy || tags.length === 0} onclick={openBulkTagModal} title={tags.length === 0 ? 'create tags first via the Tags modal' : 'open the bulk-tag editor (Add/Remove or Replace)'}>🏷 Edit tags…</button>
           <button class="btn sm" disabled={bulkBusy} onclick={bulkDelete}>🗑 delete {selected.size}</button>
+        </div>
+      {/if}
+      {#if folderFilter}
+        <div class="folder-crumb">
+          <span style:font-size="14px">📁</span>
+          <span class="folder-crumb-path" title={folderFilter}>{folderFilter}</span>
+          <span style:flex="1"></span>
+          <button class="btn sm" onclick={() => selectFolder(null)}>← Back to all clips</button>
         </div>
       {/if}
       <div class="bar"><b>{total}</b> clips{loading ? ' · loading…' : ''}{filterTagIds.length ? ' · filtered by ' + filterTagIds.length + ' tag(s)' : ''}{pageCount > 1 ? ` · page ${page} / ${pageCount}` : ''}</div>
@@ -1322,6 +1501,24 @@
   </div>
 {/if}
 
+{#snippet folderNode(f: FolderNode, depth: number)}
+  <div class="folder-row" style:padding-left={(depth * 14) + 'px'}>
+    {#if f.children.length > 0}
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <span class="folder-expand" role="button" tabindex="0" onclick={() => toggleFolderExpand(f.path)}>{expandedFolders.has(f.path) ? '▾' : '▸'}</span>
+    {:else}
+      <span class="folder-expand-spacer"></span>
+    {/if}
+    <button class="folder-name" class:on={folderFilter === f.path} onclick={() => selectFolder(f.path)} title={f.path}>
+      📁 {f.name} <span class="ct">{f.count}</span>
+    </button>
+  </div>
+  {#if expandedFolders.has(f.path) && f.children.length > 0}
+    {#each f.children as child (child.path)}
+      {@render folderNode(child, depth + 1)}
+    {/each}
+  {/if}
+{/snippet}
 {#snippet tagFace(t: Tag)}{#if t.image_ref}<img class="tagimg" src="/api/tag-images/{t.image_ref}" alt="" />{:else if t.icon}{t.icon}{/if}{/snippet}
 {#snippet noteBody(body: string)}{#each splitMentions(body) as seg}{#if seg.id != null}{@const nm = seg.noteId != null ? detail?.mentioned_notes?.[String(seg.noteId)] : undefined}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions --><span class="mention" role="link" tabindex="0" onclick={() => (seg.noteId != null ? navToNote(seg.id ?? 0, seg.noteId) : navTo(seg.id ?? 0))} onmouseenter={(e) => showMentionPopup(e, seg.id ?? 0, seg.text, nm?.body, nm?.timestamp_ms)} onmouseleave={hideMentionPopup}>@{seg.text}{#if nm}<span class="ts-badge" style:margin-left="4px">{fmt(nm.timestamp_ms)}</span>{/if}</span>{:else}{seg.text}{/if}{/each}{/snippet}
 {#snippet refCard(r: ReferenceView, outgoing: boolean)}
@@ -1468,6 +1665,74 @@
   </div>
 {/if}
 
+{#if showBulkTagModal}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) closeBulkTagModal(); }}>
+    <div class="modal bulk-tag-modal">
+      <div class="mtop"><h3>Tag {bulkTagModalSize} clip{bulkTagModalSize === 1 ? '' : 's'}</h3><span style:flex="1"></span><button class="btn sm" onclick={closeBulkTagModal}>Close</button></div>
+      <div class="settings-tabs">
+        <button class:on={bulkTagMode === 'modify'} onclick={() => (bulkTagMode = 'modify')}>Add / Remove (diff)</button>
+        <button class:on={bulkTagMode === 'replace'} onclick={() => (bulkTagMode = 'replace')}>Replace (override)</button>
+      </div>
+      <div class="mbody">
+        {#if bulkTagMode === 'modify'}
+          <p class="faint" style:font-size="12px" style:margin-bottom="8px">
+            Per-tag <kbd>+</kbd> / <kbd>−</kbd> queue additions and removals. Tags you leave alone stay exactly as they are on each clip.
+          </p>
+        {:else}
+          <p class="faint" style:font-size="12px" style:margin-bottom="8px">
+            The checked tags become the EXACT tag set on each selected clip. Any other tags currently on those clips are removed.
+          </p>
+        {/if}
+        <input class="field" placeholder="search tags…" bind:value={bulkTagSearch} style:width="100%" style:margin-bottom="10px" />
+        <div class="bulk-tag-list">
+          {#if filteredBulkTags.length === 0}
+            <p class="faint" style:font-size="12px" style:padding="12px 0" style:text-align="center">{tags.length === 0 ? 'No tags yet — create some in the Tags modal first.' : 'No tags match your search.'}</p>
+          {/if}
+          {#each filteredBulkTags as t (t.id)}
+            {@const have = bulkTagCounts.get(t.id) ?? 0}
+            {#if bulkTagMode === 'modify'}
+              {@const queuedAdd = bulkTagAdd.has(t.id)}
+              {@const queuedRemove = bulkTagRemove.has(t.id)}
+              {@const missing = bulkTagModalSize - have}
+              <div class="bulk-tag-row" class:queued-add={queuedAdd} class:queued-remove={queuedRemove}>
+                <span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name}</span>
+                <span class="bulk-tag-counts" title="clips currently with this tag, out of selected">{have}/{bulkTagModalSize}</span>
+                <span class="bulk-tag-preview">
+                  {#if queuedAdd}<span class="bulk-tag-preview-add">+{missing}</span>
+                  {:else if queuedRemove}<span class="bulk-tag-preview-remove">−{have}</span>{/if}
+                </span>
+                <button class="bulk-tag-plus" class:on={queuedAdd} disabled={missing === 0} onclick={() => toggleBulkTagAdd(t.id)} title={missing === 0 ? 'all selected clips already have this tag' : `queue + add to ${missing} clip${missing === 1 ? '' : 's'} that don\'t have it`}>+</button>
+                <button class="bulk-tag-minus" class:on={queuedRemove} disabled={have === 0} onclick={() => toggleBulkTagRemove(t.id)} title={have === 0 ? 'no selected clip has this tag' : `queue − remove from ${have} clip${have === 1 ? '' : 's'} that have it`}>−</button>
+              </div>
+            {:else}
+              {@const checked = bulkTagReplaceSet.has(t.id)}
+              {@const indeterminate = !checked && have > 0 && have < bulkTagModalSize}
+              <label class="bulk-tag-replace-row">
+                <input type="checkbox" {checked} indeterminate={indeterminate} onchange={(e) => toggleBulkTagReplace(t.id, (e.currentTarget as HTMLInputElement).checked)} />
+                <span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name}</span>
+                <span class="bulk-tag-counts" title="clips currently with this tag, out of selected">{have}/{bulkTagModalSize}</span>
+              </label>
+            {/if}
+          {/each}
+        </div>
+      </div>
+      <div class="mfoot">
+        <span class="faint" style:font-size="11.5px">
+          {#if bulkTagMode === 'modify'}
+            {bulkTagAdd.size} to add · {bulkTagRemove.size} to remove
+          {:else}
+            target set: {bulkTagReplaceSet.size} tag{bulkTagReplaceSet.size === 1 ? '' : 's'}
+          {/if}
+        </span>
+        <span style:flex="1"></span>
+        <button class="btn sm" onclick={closeBulkTagModal} disabled={bulkBusy}>Cancel</button>
+        <button class="btn sm primary" onclick={applyBulkTag} disabled={bulkBusy || !canApplyBulkTag}>{bulkBusy ? 'Applying…' : 'Apply'}</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if dialog}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) dialogCancel(); }}>
@@ -1497,7 +1762,9 @@
   <div class="toasts">
     {#each toasts as t (t.id)}
       <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div class="toast {t.kind}" onclick={() => (toasts = toasts.filter((x) => x.id !== t.id))} title="dismiss">{t.text}</div>
+      <div class="toast {t.kind}" class:sticky={t.sticky} onclick={() => toastDismiss(t.id)} title="dismiss">
+        {#if t.sticky && t.kind === 'info'}<span class="spinner" aria-hidden="true"></span>{/if}{t.text}
+      </div>
     {/each}
   </div>
 {/if}
@@ -1650,6 +1917,11 @@
   .toast.error { border-left-color: #ef5b5b; }
   .toast.success { border-left-color: #56c271; }
   .toast.info { border-left-color: var(--accent); }
+  .toast.sticky { cursor: default; }   /* sticky toasts hold until the work completes (then update or dismiss) */
+  .toast .spinner { display: inline-block; width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.18);
+                    border-top-color: rgba(255,255,255,.65); border-radius: 50%; animation: spin .7s linear infinite;
+                    vertical-align: -1px; margin-right: 7px; }
+  @keyframes spin { to { transform: rotate(360deg); } }
   @keyframes toastin { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
   .dlg { width: min(420px, 100%); padding: 18px; }
   .dlg-msg { font-size: 14.5px; font-weight: 600; line-height: 1.4; }
@@ -1679,8 +1951,6 @@
   .thumb:hover .selbox, .selbox.on { opacity: 1; pointer-events: auto; }
   .selbox.on { background: var(--accent); border-color: var(--accent); color: #ffffff; }
   .bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 11px; margin-bottom: 10px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; }
-  .bulkbar label { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
-  .bulkbar select { background: var(--bg-2); color: inherit; border: 1px solid var(--border); border-radius: 5px; padding: 2px 4px; }
   .x { color: var(--text-3); }
   .x:hover { color: #ef5b5b; }
   .modal-bg { position: fixed; inset: 0; background: rgba(4,6,9,.66); display: grid; place-items: center; z-index: 60; padding: 30px; }
@@ -1737,4 +2007,39 @@
   .resize-edge.ne { top: 0;    right: 0;   width: 6px;  height: 6px; cursor: nesw-resize; }
   .resize-edge.sw { bottom: 0; left: 0;    width: 6px;  height: 6px; cursor: nesw-resize; }
   .resize-edge.se { bottom: 0; right: 0;   width: 6px;  height: 6px; cursor: nwse-resize; }
+  /* --- folder tree (sidebar) + folder-filter breadcrumb -------------------------------------- */
+  .sec-clear { background: transparent; border: none; color: var(--text-3); font-size: 11px; font-weight: 700; cursor: pointer; margin-left: 6px; padding: 0 4px; }
+  .sec-clear:hover { color: #ef5b5b; }
+  .folder-tree { display: flex; flex-direction: column; gap: 0; max-height: 40vh; overflow-y: auto; margin: 0 0 4px; }
+  .folder-row { display: flex; align-items: center; gap: 2px; min-width: 0; }
+  .folder-expand { width: 14px; flex: none; cursor: pointer; color: var(--text-3); font-size: 9px; padding: 0 2px; user-select: none; line-height: 1; }
+  .folder-expand:hover { color: var(--text); }
+  .folder-expand-spacer { width: 14px; flex: none; }
+  .folder-name { flex: 1; min-width: 0; text-align: left; padding: 3px 6px; border-radius: 5px; font-size: 12px; color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; background: transparent; border: none; cursor: pointer; }
+  .folder-name:hover { background: var(--bg-2); color: var(--text); }
+  .folder-name.on { background: var(--accent-soft); color: var(--text); font-weight: 600; }
+  .folder-name .ct { font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--text-3); margin-left: 6px; font-weight: normal; }
+  .folder-crumb { display: flex; align-items: center; gap: 10px; padding: 7px 11px; margin-bottom: 10px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; font-size: 12.5px; }
+  .folder-crumb-path { font-family: ui-monospace, monospace; font-size: 11.5px; flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); min-width: 0; }
+  /* --- bulk-tag modal (Add/Remove diff + Replace) ------------------------------------------- */
+  .modal.bulk-tag-modal { width: min(620px, 100%); }
+  .bulk-tag-list { display: flex; flex-direction: column; gap: 4px; max-height: 52vh; overflow-y: auto; padding-right: 4px; }
+  .bulk-tag-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--bg-2); border: 1px solid var(--border); transition: border-color .12s, background .12s; }
+  .bulk-tag-row.queued-add { border-color: #56c271; background: rgba(86,194,113,.08); }
+  .bulk-tag-row.queued-remove { border-color: #ef5b5b; background: rgba(239,91,91,.08); }
+  .bulk-tag-row .pill { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bulk-tag-counts { font-family: ui-monospace, monospace; font-size: 10.5px; color: var(--text-3); white-space: nowrap; flex: none; min-width: 44px; text-align: right; }
+  .bulk-tag-preview { font-family: ui-monospace, monospace; font-size: 10.5px; font-weight: 700; min-width: 38px; flex: none; text-align: right; }
+  .bulk-tag-preview-add { color: #56c271; }
+  .bulk-tag-preview-remove { color: #ef5b5b; }
+  .bulk-tag-plus, .bulk-tag-minus { width: 28px; height: 26px; border-radius: 5px; border: 1px solid var(--border); background: var(--bg-1); color: var(--text-2); cursor: pointer; font-weight: 700; padding: 0; line-height: 1; font-size: 14px; flex: none; transition: background .12s, color .12s, border-color .12s; }
+  .bulk-tag-plus:hover:not(:disabled) { background: rgba(86,194,113,.18); color: #56c271; border-color: #56c271; }
+  .bulk-tag-minus:hover:not(:disabled) { background: rgba(239,91,91,.18); color: #ef5b5b; border-color: #ef5b5b; }
+  .bulk-tag-plus.on { background: #56c271; color: #0e1116; border-color: #56c271; }
+  .bulk-tag-minus.on { background: #ef5b5b; color: #fff; border-color: #ef5b5b; }
+  .bulk-tag-plus:disabled, .bulk-tag-minus:disabled { opacity: .35; cursor: default; }
+  .bulk-tag-replace-row { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: 6px; background: var(--bg-2); border: 1px solid var(--border); cursor: pointer; }
+  .bulk-tag-replace-row:hover { border-color: #3a4350; }
+  .bulk-tag-replace-row .pill { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bulk-tag-replace-row input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; flex: none; accent-color: var(--accent); }
 </style>

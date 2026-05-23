@@ -251,6 +251,17 @@ class SqliteAssetRepository(_Repo):
         if f.recorded_before is not None:
             where.append("json_extract(a.metadata_json, '$.recorded_at') <= ?")
             params.append(f.recorded_before.isoformat())
+        if f.path_under is not None:
+            # Match a path equal to the folder OR strictly inside it, with either separator.
+            # ESCAPE uses '|' (never in a real file path) so the path's literal % / _ stay literal.
+            escaped = f.path_under.replace("|", "||").replace("%", "|%").replace("_", "|_")
+            where.append(
+                "EXISTS (SELECT 1 FROM asset_paths p WHERE p.asset_id = a.id AND p.present = 1 "
+                "AND (p.path = ? OR p.path LIKE ? ESCAPE '|' OR p.path LIKE ? ESCAPE '|'))"
+            )
+            params.append(f.path_under)
+            params.append(escaped + "\\%")
+            params.append(escaped + "/%")
         if f.text:
             fts = _fts_query(f.text)
             if fts:
@@ -304,6 +315,12 @@ class SqliteAssetRepository(_Repo):
 
     def all_paths(self) -> list[AssetPath]:
         return [_asset_path(r) for r in self._c.execute("SELECT * FROM asset_paths ORDER BY id").fetchall()]
+
+    def distinct_present_paths(self) -> list[str]:
+        rows = self._c.execute(
+            "SELECT DISTINCT path FROM asset_paths WHERE present = 1 ORDER BY path"
+        ).fetchall()
+        return [r["path"] for r in rows]
 
     def find_by_path(self, path: str) -> Asset | None:
         row = self._c.execute(

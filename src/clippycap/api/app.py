@@ -174,6 +174,16 @@ class IdsBody(BaseModel):
     ids: list[int]
 
 
+class BulkTagsBody(BaseModel):
+    """A bulk tag change. When ``replace_with`` is set, the listed clips' tags become exactly that
+    set (others removed); otherwise ``add`` / ``remove`` are applied as a diff."""
+
+    ids: list[int] = Field(min_length=1)
+    add: list[int] = Field(default_factory=list)
+    remove: list[int] = Field(default_factory=list)
+    replace_with: list[int] | None = None
+
+
 class NoteTagsBody(BaseModel):
     tag_ids: list[int]
 
@@ -241,14 +251,15 @@ class ExtractSegmentBody(BaseModel):
 # --------------------------------------------------------------------------- helpers
 
 
-def _filter_from_query(
+def _filter_from_query(  # noqa: PLR0913 -- one keyword per independent filter is the point
     *, tags_all: list[int], tags_any: list[int], tags_none: list[int], untagged: bool,
     text: str | None, only_missing: bool, never_opened: bool, media_type: str | None,
+    path_under: str | None = None,
 ) -> AssetFilter:
     return AssetFilter(
         tags_all=list(tags_all), tags_any=list(tags_any), tags_none=list(tags_none),
         untagged_only=untagged, text=text or None, only_missing=only_missing,
-        never_opened=never_opened, media_type=media_type,
+        never_opened=never_opened, media_type=media_type, path_under=path_under,
     )
 
 
@@ -304,6 +315,7 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         only_missing: bool = False,
         never_opened: bool = False,
         media_type: str | None = None,
+        path_under: str | None = None,
         sort: str = "recorded_desc",
         offset: int = 0,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -311,10 +323,56 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         criteria = _filter_from_query(
             tags_all=tags_all, tags_any=tags_any, tags_none=tags_none, untagged=untagged,
             text=text, only_missing=only_missing, never_opened=never_opened, media_type=media_type,
+            path_under=path_under,
         )
         page = app.assets.list_assets(filter=criteria, sort_key=sort, offset=offset, limit=limit)
         return {"items": [_summary_dict(s) for s in page.items], "total": page.total,
                 "offset": page.offset, "limit": page.limit}
+
+    @api.get("/api/assets/ids")
+    def list_asset_ids(  # noqa: PLR0913 -- mirrors /api/assets' filter parameters
+        app: AppDep,
+        tags_all: Annotated[list[int], Query()] = [],  # noqa: B006
+        tags_any: Annotated[list[int], Query()] = [],  # noqa: B006
+        tags_none: Annotated[list[int], Query()] = [],  # noqa: B006
+        untagged: bool = False,
+        text: str | None = None,
+        only_missing: bool = False,
+        never_opened: bool = False,
+        media_type: str | None = None,
+        path_under: str | None = None,
+        sort: str = "added_desc",
+    ) -> list[int]:
+        """Every asset id matching the filter (no pagination). The frontend uses this for the
+        bulk-bar "select all matching" shortcut so an action can hit clips beyond the current page."""
+        criteria = _filter_from_query(
+            tags_all=tags_all, tags_any=tags_any, tags_none=tags_none, untagged=untagged,
+            text=text, only_missing=only_missing, never_opened=never_opened, media_type=media_type,
+            path_under=path_under,
+        )
+        return app.assets.all_matching_ids(filter=criteria, sort_key=sort)
+
+    @api.get("/api/folders")
+    def list_folders(app: AppDep) -> list[dict[str, Any]]:
+        """Folders that hold at least one present clip, each with the cumulative descendant clip
+        count. The frontend builds a collapsible folder tree from this list."""
+        return [{"path": p, "count": c} for p, c in app.assets.folder_counts()]
+
+    @api.post("/api/assets/tag-counts")
+    def asset_tag_counts(app: AppDep, body: IdsBody) -> dict[int, int]:
+        """For each tag id, how many of ``ids`` currently have that tag. Drives the bulk-tag
+        modal's per-tag "N of M have this" indicator and pre-fills Replace mode's checkboxes."""
+        return app.tags.bulk_tag_counts(body.ids)
+
+    @api.post("/api/assets/bulk-tags")
+    def bulk_tags(app: AppDep, body: BulkTagsBody) -> dict[str, int]:
+        """Apply tag changes across many clips in one transaction. ``replace_with`` (when given)
+        sets each asset's tags to exactly that set; otherwise ``add`` / ``remove`` are applied
+        as a diff. Returns counts of links actually created / removed."""
+        return app.tags.bulk_apply(
+            asset_ids=body.ids, add=body.add, remove=body.remove,
+            replace_with=body.replace_with,
+        )
 
     @api.get("/api/assets/{asset_id}")
     def get_asset(app: AppDep, asset_id: int) -> dict[str, Any]:
