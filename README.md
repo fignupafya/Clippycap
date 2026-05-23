@@ -85,6 +85,6 @@ Quality gates:
 
 ## License
 
-PolyForm Noncommercial — see [`LICENSE`](./LICENSE). Use it freely; the copyright notice has to travel with the source.
+**[PolyForm Noncommercial License 1.0.0](./LICENSE)** — Clippycap is source-available and free for personal, hobby, educational, and other noncommercial use. You may read, run, modify, and share modified versions for noncommercial purposes; selling Clippycap, repackaging it as your own product, or using it commercially is not granted by this license. If you need a commercial license, get in touch.
 
 FFmpeg attribution (when bundled in the installer): see [`THIRD_PARTY_NOTICES.txt`](./THIRD_PARTY_NOTICES.txt).

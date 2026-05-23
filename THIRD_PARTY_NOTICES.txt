@@ -20,7 +20,8 @@ the FFmpeg executables are covered by the GPL (version 3 or later -- see
 https://www.gnu.org/licenses/gpl-3.0.txt ).
 
 Clippycap invokes `ffmpeg` / `ffprobe` as separate command-line programs -- it does not link against
-them -- so Clippycap's own PolyForm-Noncommercial licensing is unaffected (this is "mere aggregation" under the GPL).
+them -- so Clippycap's own PolyForm-Noncommercial licensing is unaffected (this is "mere aggregation"
+under the GPL).
 
 The complete corresponding source code for the bundled FFmpeg, and the configuration / build scripts
 used to produce it, are available from:
