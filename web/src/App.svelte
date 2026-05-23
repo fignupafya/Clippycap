@@ -635,7 +635,16 @@
   }
 
   async function addSourcePrompt() {
-    const path = await promptDialog('Add a source folder', { placeholder: 'e.g. D:\\Clips', okLabel: 'Add' });
+    // Native pywebview window -> real OS folder picker. Browser fallback -> the text-input prompt
+    // (browsers don't expose a folder-path API to JS for security; ``webkitdirectory`` returns the
+    // files but never the absolute folder path we need).
+    let path: string | null = null;
+    if (nativeWindow) {
+      try { path = (await (window as unknown as { pywebview: { api: { pick_folder: () => Promise<string | null> } } }).pywebview.api.pick_folder()) ?? null; }
+      catch (e) { toast('Folder picker failed: ' + String(e), 'error'); return; }
+    } else {
+      path = await promptDialog('Add a source folder', { placeholder: 'e.g. D:\\Clips', okLabel: 'Add' });
+    }
     if (!path) return;
     try { await api.addSource(path); await loadSources(); } catch (e) { toast(String(e), 'error'); }
   }
@@ -734,8 +743,19 @@
     })();
   }
   async function pickFfmpegPath() {
-    const p = await promptDialog('Path to ffmpeg.exe — or to the folder that contains ffmpeg.exe and ffprobe.exe',
-      { placeholder: 'C:\\ffmpeg\\bin', okLabel: 'Use this' });
+    // Native window -> real OS file picker (the backend accepts a path to ffmpeg.exe directly OR
+    // to the folder that contains it, so we let the user pick the .exe -- the most common case --
+    // with a filter, and fall back to the text-input prompt in the browser).
+    let p: string | null = null;
+    if (nativeWindow) {
+      try {
+        p = (await (window as unknown as { pywebview: { api: { pick_file: (t?: string[]) => Promise<string | null> } } })
+          .pywebview.api.pick_file(['Executable (*.exe)', 'All files (*.*)'])) ?? null;
+      } catch (e) { toast('File picker failed: ' + String(e), 'error'); return; }
+    } else {
+      p = await promptDialog('Path to ffmpeg.exe — or to the folder that contains ffmpeg.exe and ffprobe.exe',
+        { placeholder: 'C:\\ffmpeg\\bin', okLabel: 'Use this' });
+    }
     if (p === null) return;
     try {
       ffmpegStatus = await api.setFfmpegPath(p);

@@ -240,6 +240,43 @@ class _WindowApi:
         except Exception:
             _log.exception("set_window_bounds dispatch failed")
 
+    def pick_folder(self) -> str | None:
+        """Open the OS folder picker and return the chosen absolute path (or ``None`` on cancel).
+        Used by the renderer's "+ Add source folder" / Settings → FFmpeg → custom path UI so the
+        user gets a real Explorer dialog instead of having to type a path by hand."""
+        if self._window is None:
+            return None
+        try:
+            import webview  # noqa: PLC0415  -- pywebview package; import lazy so the rest of the API works without it
+            result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        except Exception:
+            _log.exception("pick_folder failed")
+            return None
+        if not result:
+            return None
+        first = result[0] if isinstance(result, list | tuple) else result
+        return str(first) if first else None
+
+    def pick_file(self, file_types: list[str] | None = None) -> str | None:
+        """Open the OS file picker. ``file_types`` is a list of pywebview-style filter specs
+        (each looks like ``"Description (*.ext;*.ext2)"``); pass an empty list / ``None`` to show
+        every file. Returns the chosen absolute file path or ``None`` on cancel."""
+        if self._window is None:
+            return None
+        try:
+            import webview  # noqa: PLC0415
+            kwargs: dict[str, Any] = {}
+            if file_types:
+                kwargs["file_types"] = tuple(file_types)
+            result = self._window.create_file_dialog(webview.OPEN_DIALOG, **kwargs)
+        except Exception:
+            _log.exception("pick_file failed")
+            return None
+        if not result:
+            return None
+        first = result[0] if isinstance(result, list | tuple) else result
+        return str(first) if first else None
+
 
 def _run_pywebview_window(url: str, shell: ShellConfig, server: uvicorn.Server, application: Application) -> bool:
     """Open the UI as a frameless desktop window (pywebview / WebView2), blocking until it is closed.
