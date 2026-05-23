@@ -23,6 +23,7 @@ first-run flow, not here, because it needs the OS "known folders" API.)
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import tomllib
@@ -33,6 +34,8 @@ from typing import Any
 from pydantic import ValidationError
 
 from .schema import Config
+
+_log = logging.getLogger(__name__)
 
 ENV_PREFIX = "CLIPPYCAP__"
 ENV_NESTED_SEPARATOR = "__"
@@ -144,6 +147,44 @@ def _expand_tokens(node: Any, tokens: Mapping[str, Path]) -> Any:
 # --------------------------------------------------------------------------- TOML reading
 
 
+def _path_in(data: Any, loc: Any) -> bool:
+    """Returns True if ``data`` contains the dotted path ``loc`` (a tuple/list of keys). Used to
+    tell apart extras coming from ``default.toml`` (developer bug; must fail) from extras coming
+    from the merged-in sources (upgrade artifact; safe to strip)."""
+    if not isinstance(loc, tuple | list) or not loc:
+        return False
+    cursor: Any = data
+    for step in loc:
+        if isinstance(cursor, dict) and step in cursor:
+            cursor = cursor[step]
+        else:
+            return False
+    return True
+
+
+def _strip_extra_keys(data: Any, extra_errors: list[dict[str, Any]]) -> list[str]:
+    """Mutate ``data`` in place: for every Pydantic ``extra_forbidden`` error in ``extra_errors``,
+    remove the offending key from its parent dict. Returns the dotted paths actually removed.
+    Used by :func:`load_config` to tolerate keys that were valid in an older version's schema."""
+    removed: list[str] = []
+    for err in extra_errors:
+        loc = err.get("loc")
+        if not isinstance(loc, tuple | list) or not loc:
+            continue
+        parent: Any = data
+        for step in loc[:-1]:
+            if isinstance(parent, dict) and step in parent:
+                parent = parent[step]
+            else:
+                parent = None
+                break
+        last = loc[-1]
+        if isinstance(parent, dict) and last in parent:
+            parent.pop(last)
+            removed.append(".".join(str(p) for p in loc))
+    return removed
+
+
 def _read_toml(path: Path) -> dict[str, Any]:
     try:
         with path.open("rb") as handle:
@@ -225,7 +266,34 @@ def load_config(
     try:
         config = Config.model_validate(expanded)
     except ValidationError as exc:
-        raise ConfigError(f"Configuration is invalid:\n{exc}") from exc
+        # Recovery path for upgrades: an older ``local.toml`` may carry keys we have since removed
+        # or renamed. The schema is intentionally ``extra="forbid"`` (so a fresh typo still fails
+        # loudly), but keys that were valid in a *previous* version get stripped + logged + retried.
+        # We only tolerate extras that came from the merged-in sources (``local.toml`` / env); an
+        # extra coming from ``default.toml`` is a developer bug and must fail.
+        extras: list[dict[str, Any]] = [
+            dict(err) for err in exc.errors() if err.get("type") == "extra_forbidden"
+        ]
+        if not extras:
+            raise ConfigError(f"Configuration is invalid:\n{exc}") from exc
+        if any(_path_in(default_raw, err.get("loc")) for err in extras):
+            raise ConfigError(f"Configuration is invalid:\n{exc}") from exc
+        removed = _strip_extra_keys(expanded, extras)
+        if not removed:
+            # Errors flagged extras but their paths were unreachable in ``expanded`` (e.g. masked
+            # by an earlier strip in the same error batch). Re-raise to avoid an infinite loop.
+            raise ConfigError(f"Configuration is invalid:\n{exc}") from exc
+        _log.warning(
+            "Ignoring %d unknown config key(s) -- almost certainly leftover from a previous "
+            "Clippycap version. Remove them from local.toml (or update them) to silence this "
+            "warning: %s",
+            len(removed),
+            ", ".join(removed),
+        )
+        try:
+            config = Config.model_validate(expanded)
+        except ValidationError as exc2:
+            raise ConfigError(f"Configuration is invalid:\n{exc2}") from exc2
 
     should_write = (
         config.app.write_local_on_first_run
