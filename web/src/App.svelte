@@ -87,6 +87,7 @@
 
   let quick = $state<Quick>('all');
   let filterTagIds = $state<number[]>([]);
+  let filterCategoryId = $state<number | null>(null);   // filter the library to a whole category (its subtree's tags)
   let searchText = $state('');
   let appliedText = $state('');
   let sort = $state('recorded_desc');
@@ -269,8 +270,14 @@
   async function loadAssets() {
     loading = true; error = null;
     try {
+      const catTags = categoryFilterTagIds();
+      if (catTags !== null && catTags.length === 0) {        // category filter active but the category has no tagged clips
+        assets = []; total = 0; loading = false; return;
+      }
       const resp = await api.listAssets({
-        tags_all: filterTagIds, untagged: quick === 'untagged', never_opened: quick === 'new',
+        tags_all: catTags === null ? filterTagIds : undefined,
+        tags_any: catTags ?? undefined,
+        untagged: quick === 'untagged', never_opened: quick === 'new',
         text: appliedText.trim() || undefined, sort,
         path_under: folderFilter ?? undefined,
         offset: (page - 1) * pageSize, limit: pageSize,
@@ -411,12 +418,12 @@
   // signals only; `untrack` keeps the `page = 1` write from making this depend on `page` itself,
   // so paging within a query does not re-trigger it.
   $effect(() => {
-    void [quick, filterTagIds, appliedText, sort, folderFilter];
+    void [quick, filterTagIds, filterCategoryId, appliedText, sort, folderFilter];
     untrack(() => { page = 1; });
   });
   // Reload + scroll-to-top whenever the query or the page changes (deps listed explicitly so the
   // tracking is robust regardless of the async load).
-  $effect(() => { void [quick, filterTagIds, appliedText, sort, page, pageSize, folderFilter]; void reloadGrid(); });
+  $effect(() => { void [quick, filterTagIds, filterCategoryId, appliedText, sort, page, pageSize, folderFilter]; void reloadGrid(); });
   $effect(() => { if (videoEl) videoEl.playbackRate = playbackRate; });
   $effect(() => { generalNoteText = detail?.general_note ?? ''; });
   $effect(() => { if (detail) { selIn = null; selOut = null; } });   // a new (or refreshed) asset clears the selection
@@ -436,12 +443,50 @@
     return typeof ra === 'string' && ra.length >= 16 ? ra.slice(0, 16).replace('T', ' ') : '';
   }
   function toggleTagFilter(id: number) {
-    quick = 'all';
+    quick = 'all'; filterCategoryId = null;                 // tag-filter and category-filter are one dimension at a time
     filterTagIds = filterTagIds.includes(id) ? filterTagIds.filter((x) => x !== id) : [...filterTagIds, id];
+  }
+  // Filter the library to a whole category: any clip carrying a tag in that category OR a descendant
+  // category (nesting). Mutually exclusive with the per-tag filter to keep the active filter legible.
+  function toggleCategoryFilter(catId: number) {
+    quick = 'all'; filterTagIds = [];
+    filterCategoryId = filterCategoryId === catId ? null : catId;
+  }
+  function categoryDescendantIds(catId: number): number[] {
+    const out = [catId];
+    for (const g of tagGroups) if (g.parent_id === catId) out.push(...categoryDescendantIds(g.id));
+    return out;
+  }
+  // Tag ids living in a category's whole subtree (the category + all nested sub-categories).
+  function tagIdsInCategorySubtree(catId: number): number[] {
+    const cats = new Set(categoryDescendantIds(catId));
+    return tags.filter((t) => t.group_id != null && cats.has(t.group_id)).map((t) => t.id);
+  }
+  function categoryAncestorIds(catId: number): number[] {
+    const out: number[] = [];
+    const seen = new Set<number>();
+    let cur: number | null = tagGroupById.get(catId)?.parent_id ?? null;
+    while (cur != null && !seen.has(cur)) { seen.add(cur); out.push(cur); cur = tagGroupById.get(cur)?.parent_id ?? null; }
+    return out;
+  }
+  // A clip's categories are DERIVED from its tags: each tag's category plus that category's ancestors
+  // (so a clip tagged with a tag in "Players > Scout_main" shows under both). No stored membership.
+  function clipCategories(tagIds: number[]): TagGroup[] {
+    const ids = new Set<number>();
+    for (const tid of tagIds) {
+      const gid = tagById.get(tid)?.group_id;
+      if (gid != null) { ids.add(gid); for (const a of categoryAncestorIds(gid)) ids.add(a); }
+    }
+    return [...ids].map((id) => tagGroupById.get(id)).filter((g): g is TagGroup => g != null)
+      .sort((a, b) => a.sort_order - b.sort_order);
+  }
+  // null => no category filter; [] => filtering an empty category (=> show nothing).
+  function categoryFilterTagIds(): number[] | null {
+    return filterCategoryId == null ? null : tagIdsInCategorySubtree(filterCategoryId);
   }
   function selectFolder(path: string | null) {
     folderFilter = path;
-    if (path !== null) quick = 'all';                       // a folder + a quick view would conflict
+    if (path !== null) { quick = 'all'; }                   // a folder + a quick view would conflict
   }
   function toggleFolderExpand(path: string) {
     const next = new Set(expandedFolders);
@@ -452,8 +497,12 @@
   function selectAllVisible() { selected = new Set(assets.map((a) => a.id)); lastSelectedId = assets.at(-1)?.id ?? null; }
   async function selectAllMatching() {
     try {
+      const catTags = categoryFilterTagIds();
+      if (catTags !== null && catTags.length === 0) { selected = new Set(); lastSelectedId = null; return; }
       const ids = await api.listAssetIds({
-        tags_all: filterTagIds, untagged: quick === 'untagged', never_opened: quick === 'new',
+        tags_all: catTags === null ? filterTagIds : undefined,
+        tags_any: catTags ?? undefined,
+        untagged: quick === 'untagged', never_opened: quick === 'new',
         text: appliedText.trim() || undefined, sort, path_under: folderFilter ?? undefined,
       });
       selected = new Set(ids);
@@ -1321,9 +1370,9 @@
   <div class="body">
     <aside>
       <nav>
-        <button class="nav" class:on={quick === 'all' && filterTagIds.length === 0} onclick={() => { quick = 'all'; filterTagIds = []; }}>All clips <span class="ct">{total}</span></button>
-        <button class="nav" class:on={quick === 'new'} onclick={() => { quick = 'new'; filterTagIds = []; }}>New (unopened)</button>
-        <button class="nav" class:on={quick === 'untagged'} onclick={() => { quick = 'untagged'; filterTagIds = []; }}>Untagged</button>
+        <button class="nav" class:on={quick === 'all' && filterTagIds.length === 0 && filterCategoryId === null} onclick={() => { quick = 'all'; filterTagIds = []; filterCategoryId = null; }}>All clips <span class="ct">{total}</span></button>
+        <button class="nav" class:on={quick === 'new'} onclick={() => { quick = 'new'; filterTagIds = []; filterCategoryId = null; }}>New (unopened)</button>
+        <button class="nav" class:on={quick === 'untagged'} onclick={() => { quick = 'untagged'; filterTagIds = []; filterCategoryId = null; }}>Untagged</button>
       </nav>
       {#if savedViews.length > 0}
         <div class="sec-title">Saved views</div>
@@ -1351,11 +1400,10 @@
       {#each groupTags(tags, '') as section (section.group?.id ?? 'uncat')}
         {#if section.group}
           {@const g = section.group}
-          {#if g.has_page}
-            <button class="cat-sub cat-sub-link" style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)} title="open this category's hub page">{g.name} ↗</button>
-          {:else}
-            <div class="cat-sub" style:--c={g.color || 'var(--text-3)'}>{g.name}</div>
-          {/if}
+          <div class="cat-sub-row">
+            <button class="cat-sub cat-sub-filter" class:on={filterCategoryId === g.id} style:--c={g.color || 'var(--text-3)'} onclick={() => toggleCategoryFilter(g.id)} title="filter the library to this category">{g.name}</button>
+            {#if g.has_page}<button class="cat-sub-go" onclick={() => openCategoryPage(g)} title="open this category's page">↗</button>{/if}
+          </div>
         {/if}
         <div class="tagcloud" style:margin-bottom="6px">
           {#each section.tags as t (t.id)}
@@ -1439,7 +1487,7 @@
           <button class="btn sm" onclick={() => selectFolder(null)}>← Back to all clips</button>
         </div>
       {/if}
-      <div class="bar"><b>{total}</b> clips{loading ? ' · loading…' : ''}{filterTagIds.length ? ' · filtered by ' + filterTagIds.length + ' tag(s)' : ''}{pageCount > 1 ? ` · page ${page} / ${pageCount}` : ''}</div>
+      <div class="bar"><b>{total}</b> clips{loading ? ' · loading…' : ''}{filterTagIds.length ? ' · filtered by ' + filterTagIds.length + ' tag(s)' : ''}{#if filterCategoryId !== null && tagGroupById.get(filterCategoryId)} · in category <b>{tagGroupById.get(filterCategoryId)?.name}</b> <button class="x" onclick={() => (filterCategoryId = null)} title="clear category filter">×</button>{/if}{pageCount > 1 ? ` · page ${page} / ${pageCount}` : ''}</div>
       <div class="grid">
         {#each assets as a (a.id)}
           <button class="card" class:sel={selected.has(a.id)} onclick={(e) => cardClick(a, e)}>
@@ -1571,6 +1619,15 @@
         </div>
       </div>
       <div class="side">
+        {#if clipCategories(d.tag_ids).length}
+          <!-- Categories this clip belongs to -- DERIVED from its tags (a tag in category X => the
+               clip is in X, and in X's parents). Click a badge to open that category's page. -->
+          <div class="clip-cats" title="categories this clip is in (from its tags)">
+            {#each clipCategories(d.tag_ids) as g (g.id)}
+              <button class="cat-badge cat-badge-link" style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)}>📁 {g.name}</button>
+            {/each}
+          </div>
+        {/if}
         <h4>Tags</h4>
         <!-- Applied tags stay in their own row on top (unchanged), each in its tag colour. -->
         <div class="tagcloud">
@@ -2071,8 +2128,15 @@
   .cat-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--border); color: var(--text-3); }
   .cat-badge.page { padding: 1px 4px; }
   .cat-sub { --c: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: color-mix(in srgb, var(--c) 70%, var(--text-3)); border-left: 3px solid var(--c); padding-left: 6px; margin: 4px 0 3px; }
-  .cat-sub-link { display: block; width: 100%; text-align: left; background: transparent; border: none; border-left: 3px solid var(--c); cursor: pointer; }
-  .cat-sub-link:hover { color: var(--accent); }
+  .cat-sub-row { display: flex; align-items: center; gap: 2px; }
+  .cat-sub-filter { flex: 1; text-align: left; background: transparent; border: none; border-left: 3px solid var(--c); cursor: pointer; }
+  .cat-sub-filter:hover { color: var(--accent); }
+  .cat-sub-filter.on { color: var(--accent); background: var(--bg-2); }
+  .cat-sub-go { background: transparent; border: none; color: var(--text-3); font-size: 11px; cursor: pointer; padding: 0 4px; }
+  .cat-sub-go:hover { color: var(--accent); }
+  .clip-cats { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
+  .cat-badge-link { --c: var(--text-3); cursor: pointer; border-left: 3px solid var(--c); }
+  .cat-badge-link:hover { color: var(--accent); border-color: var(--accent); }
   .namelink { background: transparent; border: none; padding: 0; font-weight: 700; font-size: inherit; color: var(--text); cursor: pointer; }
   .namelink:hover { color: var(--accent); }
   /* tag/category page: a header banner above the (filtered) library grid */
