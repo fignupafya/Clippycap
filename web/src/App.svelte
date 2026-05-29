@@ -1299,14 +1299,17 @@
         </div>
       {/if}
       <div class="sec-title">Tags</div>
-      <div class="tagcloud">
-        {#each tags as t (t.id)}
-          <button class="tagchip" class:on={filterTagIds.includes(t.id)} style:background={filterTagIds.includes(t.id) ? t.color : ''} onclick={() => toggleTagFilter(t.id)}>
-            {@render tagFace(t)} {t.name} <span class="n">{t.asset_count ?? 0}</span>
-          </button>
-        {/each}
-        {#if tags.length === 0}<span class="faint" style:font-size="12px">No tags yet — create some via “Tags”.</span>{/if}
-      </div>
+      {#each groupTags(tags, '') as section (section.group?.id ?? 'uncat')}
+        {#if section.group}<div class="cat-sub" style:--c={section.group.color || 'var(--text-3)'}>{section.group.name}</div>{/if}
+        <div class="tagcloud" style:margin-bottom="6px">
+          {#each section.tags as t (t.id)}
+            <button class="tagchip" class:on={filterTagIds.includes(t.id)} style:--c={t.color} style:background={filterTagIds.includes(t.id) ? t.color : ''} onclick={() => toggleTagFilter(t.id)}>
+              {@render tagFace(t)} {t.name} <span class="n">{t.asset_count ?? 0}</span>
+            </button>
+          {/each}
+        </div>
+      {/each}
+      {#if tags.length === 0}<span class="faint" style:font-size="12px">No tags yet — create some via “Tags”.</span>{/if}
       <div class="sec-title">Sources</div>
       {#each sources as s (s.id)}<div class="src" title={s.path}>{s.path}</div>{/each}
       <button class="btn sm" style:margin-top="6px" onclick={addSourcePrompt}>+ Add source folder</button>
@@ -1960,6 +1963,7 @@
   .cat-divider { height: 1px; background: var(--border); margin: 10px 0; }
   .cat-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--border); color: var(--text-3); }
   .cat-badge.page { padding: 1px 4px; }
+  .cat-sub { --c: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: color-mix(in srgb, var(--c) 70%, var(--text-3)); border-left: 3px solid var(--c); padding-left: 6px; margin: 4px 0 3px; }
   .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); cursor: pointer; }
   .chk input { accent-color: var(--accent); }
   .tagchip.on { color: #f7f9fb; border-color: transparent; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
