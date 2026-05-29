@@ -21,6 +21,7 @@ from clippycap.core.ports import (
     ReferenceTypeRepository,
     SavedViewRepository,
     SourceRepository,
+    TagGroupRepository,
     TagRepository,
 )
 from clippycap.infra.db import repositories as repos
@@ -43,6 +44,7 @@ class SqliteUnitOfWork:
         self._conn = conn
         self.assets: AssetRepository = repos.SqliteAssetRepository(conn)
         self.tags: TagRepository = repos.SqliteTagRepository(conn)
+        self.tag_groups: TagGroupRepository = repos.SqliteTagGroupRepository(conn)
         self.notes: NoteRepository = repos.SqliteNoteRepository(conn)
         self.reference_types: ReferenceTypeRepository = repos.SqliteReferenceTypeRepository(conn)
         self.references: ReferenceRepository = repos.SqliteReferenceRepository(conn)

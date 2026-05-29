@@ -240,6 +240,26 @@ _MIGRATION_V7 = (
 )
 
 
+# v8: user-defined tag groups (categories) + per-tag/per-group "has its own page" opt-in + a
+# per-tag free-form notes body. All additive and OFF by default, so every existing tag keeps
+# behaving exactly as before: group_id NULL = uncategorised, has_page 0 = no page, notes '' = empty.
+# (No groups are seeded -- categories are entirely user-created; nothing is hardcoded.) Deleting a
+# group sets its tags' group_id back to NULL (ON DELETE SET NULL), so tags are never lost with it.
+_MIGRATION_V8 = (
+    "CREATE TABLE tag_groups ("
+    " id         INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " name       TEXT NOT NULL UNIQUE,"
+    " color      TEXT NOT NULL DEFAULT '',"
+    " sort_order INTEGER NOT NULL DEFAULT 0,"
+    " has_page   INTEGER NOT NULL DEFAULT 0"
+    ");\n"
+    "ALTER TABLE tags ADD COLUMN group_id INTEGER REFERENCES tag_groups(id) ON DELETE SET NULL;\n"
+    "ALTER TABLE tags ADD COLUMN has_page INTEGER NOT NULL DEFAULT 0;\n"
+    "ALTER TABLE tags ADD COLUMN notes TEXT NOT NULL DEFAULT '';\n"
+    "CREATE INDEX idx_tags_group ON tags(group_id);"
+)
+
+
 # A migration step is SQL (run with executescript) or a callable for data migrations needing logic.
 MigrationStep = str | Callable[[sqlite3.Connection], None]
 
@@ -251,5 +271,6 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (5, _MIGRATION_V5),
     (6, _migration_v6_titles_from_filenames),
     (7, _MIGRATION_V7),
+    (8, _MIGRATION_V8),
 )
 LATEST_VERSION: int = MIGRATIONS[-1][0]

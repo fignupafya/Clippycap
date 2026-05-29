@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from clippycap.core.entities import Asset, AssetPath, Note, Reference, Tag
+from clippycap.core.entities import Asset, AssetPath, Note, Reference, Tag, TagGroup
 from clippycap.core.errors import ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.events import (
     AssetOpened,
@@ -291,34 +291,51 @@ class TagService:
         with self._db.transaction() as uow:
             return [(t, uow.tags.asset_count(t.id)) for t in uow.tags.list_all() if t.id is not None]
 
-    def create(
+    def create(  # noqa: PLR0913 -- one keyword per independent tag attribute is the point
         self, *, name: str, color: str, icon: str | None = None, image_ref: str | None = None,
         description: str = "", sort_order: int | None = None,
+        group_id: int | None = None, has_page: bool = False, notes: str = "",
     ) -> Tag:
         with self._db.transaction() as uow:
+            if group_id is not None and uow.tag_groups.get(group_id) is None:
+                raise InvalidInputError(f"no tag category with id {group_id!r}")
             order = (
                 sort_order if sort_order is not None
                 else 1 + max((t.sort_order for t in uow.tags.list_all()), default=-1)
             )
             tag = uow.tags.add(Tag(
-                name=name, color=color, icon=icon, image_ref=image_ref, description=description, sort_order=order
+                name=name, color=color, icon=icon, image_ref=image_ref, description=description,
+                sort_order=order, group_id=group_id, has_page=has_page, notes=notes,
             ))
         assert tag.id is not None
         self._bus.publish(TagCreated(tag_id=tag.id, name=tag.name))
         return tag
 
-    def update(
+    def update(  # noqa: PLR0913 -- one keyword per independent tag attribute is the point
         self, tag_id: int, *, name: str, color: str, icon: str | None, image_ref: str | None,
         description: str, sort_order: int,
+        group_id: int | None = None, has_page: bool = False, notes: str = "",
     ) -> Tag:
         with self._db.transaction() as uow:
             tag = _require(uow.tags.get(tag_id), "tag", tag_id)
+            if group_id is not None and uow.tag_groups.get(group_id) is None:
+                raise InvalidInputError(f"no tag category with id {group_id!r}")
             old_ref = tag.image_ref
             tag.name, tag.color, tag.icon = name, color, icon
             tag.image_ref, tag.description, tag.sort_order = image_ref, description, sort_order
+            tag.group_id, tag.has_page, tag.notes = group_id, has_page, notes
             uow.tags.update(tag)
         if old_ref != image_ref:
             self._prune_image(old_ref)
+        self._bus.publish(TagUpdated(tag_id=tag_id))
+        return tag
+
+    def set_notes(self, tag_id: int, notes: str) -> Tag:
+        """Update only a tag's page notes (used by the tag page's autosaving notes editor)."""
+        with self._db.transaction() as uow:
+            tag = _require(uow.tags.get(tag_id), "tag", tag_id)
+            tag.notes = notes
+            uow.tags.update(tag)
         self._bus.publish(TagUpdated(tag_id=tag_id))
         return tag
 
@@ -426,6 +443,58 @@ class TagService:
                             removed += 1
                             current.discard(tid)
         return {"added": added, "removed": removed}
+
+
+# --------------------------------------------------------------------------- tag groups (categories)
+
+
+class TagGroupService:
+    """CRUD for user-defined tag categories. Nothing is seeded -- the library starts with zero
+    groups and the whole concept stays invisible in the UI until the user creates one."""
+
+    def __init__(self, database: Database) -> None:
+        self._db = database
+
+    def list_all(self) -> list[TagGroup]:
+        with self._db.transaction() as uow:
+            return uow.tag_groups.list_all()
+
+    def create(self, *, name: str, color: str = "", has_page: bool = False,
+               sort_order: int | None = None) -> TagGroup:
+        clean = name.strip()
+        if not clean:
+            raise InvalidInputError("a category needs a name")
+        with self._db.transaction() as uow:
+            order = (
+                sort_order if sort_order is not None
+                else 1 + max((g.sort_order for g in uow.tag_groups.list_all()), default=-1)
+            )
+            return uow.tag_groups.add(
+                TagGroup(name=clean, color=color, sort_order=order, has_page=has_page)
+            )
+
+    def update(self, group_id: int, *, name: str, color: str, has_page: bool,
+               sort_order: int) -> TagGroup:
+        clean = name.strip()
+        if not clean:
+            raise InvalidInputError("a category needs a name")
+        with self._db.transaction() as uow:
+            group = _require(uow.tag_groups.get(group_id), "tag category", group_id)
+            group.name, group.color = clean, color
+            group.has_page, group.sort_order = has_page, sort_order
+            uow.tag_groups.update(group)
+            return group
+
+    def delete(self, group_id: int) -> None:
+        """Delete a category. Its tags are NOT deleted -- they fall back to uncategorised
+        (ON DELETE SET NULL on tags.group_id)."""
+        with self._db.transaction() as uow:
+            _require(uow.tag_groups.get(group_id), "tag category", group_id)
+            uow.tag_groups.delete(group_id)
+
+    def reorder(self, ordered_ids: Sequence[int]) -> None:
+        with self._db.transaction() as uow:
+            uow.tag_groups.reorder(ordered_ids)
 
 
 # --------------------------------------------------------------------------- notes

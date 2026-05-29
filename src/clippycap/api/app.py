@@ -23,7 +23,7 @@ from clippycap.app.bootstrap import Application
 from clippycap.app.ffmpeg_service import FfmpegStatus
 from clippycap.app.reference_service import ReferenceView
 from clippycap.app.services import AssetDetail, AssetSummary, NoteView
-from clippycap.core.entities import Asset, ReferenceType, Source, Tag
+from clippycap.core.entities import Asset, ReferenceType, Source, Tag, TagGroup
 from clippycap.core.errors import ClippycapError, ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.query import AssetFilter
 from clippycap.infra.config.schema import EditingConfig, PlayerConfig
@@ -53,6 +53,14 @@ def _tag_dict(tag: Tag) -> dict[str, Any]:
     return {
         "id": tag.id, "name": tag.name, "color": tag.color, "icon": tag.icon,
         "image_ref": tag.image_ref, "description": tag.description, "sort_order": tag.sort_order,
+        "group_id": tag.group_id, "has_page": tag.has_page, "notes": tag.notes,
+    }
+
+
+def _tag_group_dict(group: TagGroup) -> dict[str, Any]:
+    return {
+        "id": group.id, "name": group.name, "color": group.color,
+        "sort_order": group.sort_order, "has_page": group.has_page,
     }
 
 
@@ -138,6 +146,20 @@ class TagBody(BaseModel):
     icon: str | None = None
     image_ref: str | None = None
     description: str = ""
+    sort_order: int = 0
+    group_id: int | None = None        # tag category; None => uncategorised
+    has_page: bool = False             # give this tag its own page (notes + tagged clips)
+    notes: str = ""                    # markdown body shown on the tag's page
+
+
+class TagNotesBody(BaseModel):
+    notes: str = ""
+
+
+class TagGroupBody(BaseModel):
+    name: str = Field(min_length=1)
+    color: str = ""                    # "" = no colour, or hex "#rrggbb"
+    has_page: bool = False
     sort_order: int = 0
 
 
@@ -510,6 +532,7 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         tag = app.tags.create(
             name=body.name, color=body.color, icon=body.icon, image_ref=body.image_ref,
             description=body.description, sort_order=body.sort_order,
+            group_id=body.group_id, has_page=body.has_page, notes=body.notes,
         )
         return _tag_dict(tag)
 
@@ -518,8 +541,14 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         tag = app.tags.update(
             tag_id, name=body.name, color=body.color, icon=body.icon, image_ref=body.image_ref,
             description=body.description, sort_order=body.sort_order,
+            group_id=body.group_id, has_page=body.has_page, notes=body.notes,
         )
         return _tag_dict(tag)
+
+    @api.put("/api/tags/{tag_id}/notes")
+    def set_tag_notes(app: AppDep, tag_id: int, body: TagNotesBody) -> dict[str, Any]:
+        """Update only a tag's page notes -- the tag page's autosaving notes editor calls this."""
+        return _tag_dict(app.tags.set_notes(tag_id, body.notes))
 
     @api.delete("/api/tags/{tag_id}", status_code=204)
     def delete_tag(app: AppDep, tag_id: int) -> Response:
@@ -529,6 +558,34 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     @api.post("/api/tags/reorder", status_code=204)
     def reorder_tags(app: AppDep, body: IdsBody) -> Response:
         app.tags.reorder(body.ids)
+        return Response(status_code=204)
+
+    # ---- tag groups (categories) -----------------------------------------
+    @api.get("/api/tag-groups")
+    def list_tag_groups(app: AppDep) -> list[dict[str, Any]]:
+        return [_tag_group_dict(g) for g in app.tag_groups.list_all()]
+
+    @api.post("/api/tag-groups", status_code=201)
+    def create_tag_group(app: AppDep, body: TagGroupBody) -> dict[str, Any]:
+        group = app.tag_groups.create(name=body.name, color=body.color, has_page=body.has_page)
+        return _tag_group_dict(group)
+
+    @api.put("/api/tag-groups/{group_id}")
+    def update_tag_group(app: AppDep, group_id: int, body: TagGroupBody) -> dict[str, Any]:
+        group = app.tag_groups.update(
+            group_id, name=body.name, color=body.color, has_page=body.has_page,
+            sort_order=body.sort_order,
+        )
+        return _tag_group_dict(group)
+
+    @api.delete("/api/tag-groups/{group_id}", status_code=204)
+    def delete_tag_group(app: AppDep, group_id: int) -> Response:
+        app.tag_groups.delete(group_id)        # its tags fall back to uncategorised
+        return Response(status_code=204)
+
+    @api.post("/api/tag-groups/reorder", status_code=204)
+    def reorder_tag_groups(app: AppDep, body: IdsBody) -> Response:
+        app.tag_groups.reorder(body.ids)
         return Response(status_code=204)
 
     @api.post("/api/tag-images")

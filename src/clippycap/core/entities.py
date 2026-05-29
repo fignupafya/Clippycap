@@ -45,8 +45,24 @@ class AssetPath:
 
 
 @dataclass(slots=True)
+class TagGroup:
+    """A user-defined, flat category that organises tags into a dimension (e.g. "players",
+    "maps"). Entirely user-created -- there are NO built-in groups. ``has_page`` opts the group
+    into its own hub view (a directory of its tags); off by default."""
+
+    name: str                                # unique
+    color: str = ""                          # hex "#rrggbb" or "" for none
+    sort_order: int = 0
+    has_page: bool = False
+    id: int | None = None
+
+
+@dataclass(slots=True)
 class Tag:
-    """A flat, user-defined label. ``icon`` and ``image_ref`` are mutually exclusive."""
+    """A user-defined label. ``icon`` and ``image_ref`` are mutually exclusive. ``group_id`` puts
+    it under a :class:`TagGroup` (``None`` => uncategorised). ``has_page`` opts the tag into its
+    own page (free-form ``notes`` + the clips carrying it); both off by default so a plain tag
+    stays exactly as before."""
 
     name: str                                # unique
     color: str                               # hex "#rrggbb"
@@ -54,6 +70,9 @@ class Tag:
     image_ref: str | None = None             # filename of an uploaded image stored under the data dir
     description: str = ""
     sort_order: int = 0                      # display order; also the 1..9 quick-tag order
+    group_id: int | None = None              # FK to TagGroup; None => uncategorised
+    has_page: bool = False                   # show this tag its own page (notes + tagged clips)
+    notes: str = ""                          # free-form markdown body shown on the tag's page
     created_at: datetime | None = None
     id: int | None = None
 

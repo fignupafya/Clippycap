@@ -21,6 +21,7 @@ from clippycap.core.entities import (
     SavedView,
     Source,
     Tag,
+    TagGroup,
 )
 from clippycap.core.errors import ConflictError, InvalidInputError
 from clippycap.core.query import AssetFilter
@@ -102,7 +103,20 @@ def _tag(r: sqlite3.Row) -> Tag:
         image_ref=r["image_ref"],
         description=r["description"],
         sort_order=r["sort_order"],
+        group_id=r["group_id"],
+        has_page=bool(r["has_page"]),
+        notes=r["notes"],
         created_at=_from_iso(r["created_at"]),
+        id=r["id"],
+    )
+
+
+def _tag_group(r: sqlite3.Row) -> TagGroup:
+    return TagGroup(
+        name=r["name"],
+        color=r["color"],
+        sort_order=r["sort_order"],
+        has_page=bool(r["has_page"]),
         id=r["id"],
     )
 
@@ -379,9 +393,10 @@ class SqliteTagRepository(_Repo):
         created = _now()
         try:
             cur = self._c.execute(
-                "INSERT INTO tags(name, color, icon, image_ref, description, sort_order, created_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (tag.name, tag.color, tag.icon, tag.image_ref, tag.description, tag.sort_order, created),
+                "INSERT INTO tags(name, color, icon, image_ref, description, sort_order, "
+                "group_id, has_page, notes, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (tag.name, tag.color, tag.icon, tag.image_ref, tag.description, tag.sort_order,
+                 tag.group_id, int(tag.has_page), tag.notes, created),
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"a tag named {tag.name!r} already exists") from exc
@@ -404,8 +419,10 @@ class SqliteTagRepository(_Repo):
     def update(self, tag: Tag) -> None:
         try:
             self._c.execute(
-                "UPDATE tags SET name=?, color=?, icon=?, image_ref=?, description=?, sort_order=? WHERE id=?",
-                (tag.name, tag.color, tag.icon, tag.image_ref, tag.description, tag.sort_order, tag.id),
+                "UPDATE tags SET name=?, color=?, icon=?, image_ref=?, description=?, sort_order=?, "
+                "group_id=?, has_page=?, notes=? WHERE id=?",
+                (tag.name, tag.color, tag.icon, tag.image_ref, tag.description, tag.sort_order,
+                 tag.group_id, int(tag.has_page), tag.notes, tag.id),
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"a tag named {tag.name!r} already exists") from exc
@@ -452,6 +469,53 @@ class SqliteTagRepository(_Repo):
         for r in rows:
             result[r["aid"]].append(r["tid"])
         return result
+
+
+# --------------------------------------------------------------------------- tag groups
+
+
+class SqliteTagGroupRepository(_Repo):
+    def add(self, group: TagGroup) -> TagGroup:
+        try:
+            cur = self._c.execute(
+                "INSERT INTO tag_groups(name, color, sort_order, has_page) VALUES (?,?,?,?)",
+                (group.name, group.color, group.sort_order, int(group.has_page)),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError(f"a tag category named {group.name!r} already exists") from exc
+        group.id = cur.lastrowid
+        return group
+
+    def get(self, group_id: int) -> TagGroup | None:
+        row = self._c.execute("SELECT * FROM tag_groups WHERE id = ?", (group_id,)).fetchone()
+        return _tag_group(row) if row else None
+
+    def get_by_name(self, name: str) -> TagGroup | None:
+        row = self._c.execute("SELECT * FROM tag_groups WHERE name = ?", (name,)).fetchone()
+        return _tag_group(row) if row else None
+
+    def list_all(self) -> list[TagGroup]:
+        rows = self._c.execute(
+            "SELECT * FROM tag_groups ORDER BY sort_order, name COLLATE NOCASE"
+        ).fetchall()
+        return [_tag_group(r) for r in rows]
+
+    def update(self, group: TagGroup) -> None:
+        try:
+            self._c.execute(
+                "UPDATE tag_groups SET name=?, color=?, sort_order=?, has_page=? WHERE id=?",
+                (group.name, group.color, group.sort_order, int(group.has_page), group.id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError(f"a tag category named {group.name!r} already exists") from exc
+
+    def delete(self, group_id: int) -> None:
+        # ON DELETE SET NULL on tags.group_id frees the member tags (they become uncategorised).
+        self._c.execute("DELETE FROM tag_groups WHERE id = ?", (group_id,))
+
+    def reorder(self, ordered_ids: Sequence[int]) -> None:
+        for index, gid in enumerate(ordered_ids):
+            self._c.execute("UPDATE tag_groups SET sort_order = ? WHERE id = ?", (index, gid))
 
 
 # --------------------------------------------------------------------------- notes

@@ -23,6 +23,7 @@ from .entities import (
     SavedView,
     Source,
     Tag,
+    TagGroup,
 )
 from .query import AssetFilter
 
@@ -74,6 +75,18 @@ class TagRepository(Protocol):
     def unapply(self, asset_id: int, tag_id: int) -> bool: ...
     def tag_ids_for_asset(self, asset_id: int) -> list[int]: ...
     def tag_ids_for_assets(self, asset_ids: Sequence[int]) -> dict[int, list[int]]: ...
+
+
+class TagGroupRepository(Protocol):
+    """User-defined tag categories. Entirely user-created; no built-in groups."""
+
+    def add(self, group: TagGroup) -> TagGroup: ...
+    def get(self, group_id: int) -> TagGroup | None: ...
+    def get_by_name(self, name: str) -> TagGroup | None: ...
+    def list_all(self) -> list[TagGroup]: ...
+    def update(self, group: TagGroup) -> None: ...
+    def delete(self, group_id: int) -> None: ...        # ON DELETE SET NULL frees its tags
+    def reorder(self, ordered_ids: Sequence[int]) -> None: ...
 
 
 class NoteRepository(Protocol):
@@ -157,6 +170,7 @@ class UnitOfWork(Protocol):
 
     assets: AssetRepository
     tags: TagRepository
+    tag_groups: TagGroupRepository
     notes: NoteRepository
     reference_types: ReferenceTypeRepository
     references: ReferenceRepository

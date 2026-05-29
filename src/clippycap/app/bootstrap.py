@@ -20,7 +20,7 @@ from clippycap.app.ffmpeg_service import FfmpegService
 from clippycap.app.jobs import ThreadJobQueue
 from clippycap.app.reference_service import ReferenceService, ReferenceTypeService
 from clippycap.app.scan_service import ScanService
-from clippycap.app.services import AssetService, NoteService, TagService
+from clippycap.app.services import AssetService, NoteService, TagGroupService, TagService
 from clippycap.app.source_service import SavedViewService, SourceService
 from clippycap.core.entities import ReferenceType
 from clippycap.infra.config import Config, ConfigHolder, load_config
@@ -59,6 +59,7 @@ class Application:
     jobs: ThreadJobQueue
     assets: AssetService
     tags: TagService
+    tag_groups: TagGroupService
     notes: NoteService
     references: ReferenceService
     reference_types: ReferenceTypeService
@@ -191,6 +192,7 @@ def build_application(
         config_holder=config_holder, ffmpeg_tools=ffmpeg_tools, database=database, event_bus=event_bus,
         registries=registries, jobs=jobs,
         assets=AssetService(database, event_bus, thumbnail_dir), tags=TagService(database, event_bus, tag_images_dir),
+        tag_groups=TagGroupService(database),
         notes=NoteService(database, event_bus), references=ReferenceService(database, event_bus),
         reference_types=ReferenceTypeService(database), sources=SourceService(database, event_bus),
         saved_views=SavedViewService(database),
