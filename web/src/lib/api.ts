@@ -22,6 +22,12 @@ export interface AssetDetail extends AssetSummary {
 export interface Tag {
   id: number; name: string; color: string; icon: string | null; image_ref: string | null;
   description: string; sort_order: number; asset_count?: number;
+  group_id: number | null;   // tag category; null => uncategorised
+  has_page: boolean;         // this tag has its own page (notes + tagged clips)
+  notes: string;             // markdown body shown on the tag's page
+}
+export interface TagGroup {
+  id: number; name: string; color: string; sort_order: number; has_page: boolean;
 }
 export interface ReferenceType { id: number; name: string; reverse_name: string | null; color: string; sort_order: number; }
 export interface ReferenceView {
@@ -137,10 +143,17 @@ export const api = {
   extractSegment: (id: number, start_ms: number, end_ms: number, remove_from_source: boolean) =>
     req<EditedAsset>('POST', `/api/assets/${id}/extract-segment`, { start_ms, end_ms, remove_from_source }),
   listTags: () => req<Tag[]>('GET', '/api/tags'),
-  createTag: (t: { name: string; color: string; icon?: string | null; image_ref?: string | null; sort_order?: number }) =>
+  createTag: (t: { name: string; color: string; icon?: string | null; image_ref?: string | null; sort_order?: number; group_id?: number | null; has_page?: boolean; notes?: string }) =>
     req<Tag>('POST', '/api/tags', t),
   updateTag: (id: number, t: Omit<Tag, 'id' | 'asset_count'>) => req<Tag>('PUT', `/api/tags/${id}`, t),
+  setTagNotes: (id: number, notes: string) => req<Tag>('PUT', `/api/tags/${id}/notes`, { notes }),
   deleteTag: (id: number) => req<void>('DELETE', `/api/tags/${id}`),
+  // tag categories (groups) -- user-created; the library starts with none.
+  listTagGroups: () => req<TagGroup[]>('GET', '/api/tag-groups'),
+  createTagGroup: (g: { name: string; color?: string; has_page?: boolean }) => req<TagGroup>('POST', '/api/tag-groups', g),
+  updateTagGroup: (id: number, g: { name: string; color: string; has_page: boolean; sort_order: number }) => req<TagGroup>('PUT', `/api/tag-groups/${id}`, g),
+  deleteTagGroup: (id: number) => req<void>('DELETE', `/api/tag-groups/${id}`),
+  reorderTagGroups: (ids: number[]) => req<void>('POST', '/api/tag-groups/reorder', { ids }),
   uploadTagImage: async (file: File): Promise<{ image_ref: string }> => {
     const ext = (file.name.split('.').pop() ?? '').toLowerCase();
     const res = await fetch(`/api/tag-images?ext=${encodeURIComponent(ext)}`, {

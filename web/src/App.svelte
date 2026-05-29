@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Folder, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Folder, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag, TagGroup } from './lib/api';
   import WindowControls from './lib/WindowControls.svelte';
   import Pager from './lib/Pager.svelte';
   import logoUrl from './assets/clippycap-logo.png';
@@ -42,7 +42,25 @@
 
   let tags = $state<Tag[]>([]);
   let tagById = $derived(new Map(tags.map((t) => [t.id, t])));
+  let tagGroups = $state<TagGroup[]>([]);
+  let tagGroupById = $derived(new Map(tagGroups.map((g) => [g.id, g])));
+  let clipTagSearch = $state('');            // search box in the clip detail's tag picker
   let sources = $state<Source[]>([]);
+
+  // Group a list of tags into category sections for the picker / sidebar. Categories come in their
+  // own sort order; uncategorised tags fall into a trailing `null` section. `query` narrows by name.
+  function groupTags(list: Tag[], query: string): { group: TagGroup | null; tags: Tag[] }[] {
+    const q = query.trim().toLowerCase();
+    const match = (t: Tag) => !q || t.name.toLowerCase().includes(q);
+    const sections: { group: TagGroup | null; tags: Tag[] }[] = [];
+    for (const g of tagGroups) {
+      const inGroup = list.filter((t) => t.group_id === g.id && match(t));
+      if (inGroup.length) sections.push({ group: g, tags: inGroup });
+    }
+    const uncategorised = list.filter((t) => t.group_id == null && match(t));
+    if (uncategorised.length) sections.push({ group: null, tags: uncategorised });
+    return sections;
+  }
   let savedViews = $state<SavedView[]>([]);
   let assets = $state<AssetSummary[]>([]);
   let total = $state(0);
@@ -133,6 +151,9 @@
   let tagIcon = $state('');
   let editingTagId = $state<number | null>(null);
   let tagImageRef = $state<string | null>(null);
+  let newTagGroupId = $state<number | null>(null);   // category chosen in the tag create/edit form
+  let newTagHasPage = $state(false);                 // "give this tag its own page" toggle
+  let newGroupName = $state('');                     // "new category" input in the tag manager
   let uploadingImg = $state(false);
   // per-note tag dropdown (only one open at a time)
   let tagDropdownNoteId = $state<number | null>(null);
@@ -227,7 +248,10 @@
   }
   function dialogOk() { const d = dialog; dialog = null; mention = null; if (d) d.done(d.kind === 'prompt' ? d.value : true); }
   function dialogCancel() { const d = dialog; dialog = null; mention = null; if (d) d.done(d.kind === 'prompt' ? null : false); }
-  async function loadTags() { try { tags = await api.listTags(); } catch (e) { error = String(e); } }
+  async function loadTags() {
+    try { [tags, tagGroups] = await Promise.all([api.listTags(), api.listTagGroups()]); }
+    catch (e) { error = String(e); }
+  }
   async function loadSources() { try { sources = await api.listSources(); } catch (e) { error = String(e); } }
   async function loadFolders() { try { folders = await api.listFolders(); } catch { /* best effort */ } }
   // Fetch the current page of the grid. The grid only ever holds `pageSize` cards, so the DOM (and
@@ -769,8 +793,8 @@
     catch (e) { toast(String(e), 'error'); }
   }
 
-  function startEditTag(t: Tag) { editingTagId = t.id; newTagName = t.name; newTagColor = t.color; tagIcon = t.icon ?? ''; tagImageRef = t.image_ref; }
-  function cancelEditTag() { editingTagId = null; newTagName = ''; tagIcon = ''; tagImageRef = null; }
+  function startEditTag(t: Tag) { editingTagId = t.id; newTagName = t.name; newTagColor = t.color; tagIcon = t.icon ?? ''; tagImageRef = t.image_ref; newTagGroupId = t.group_id; newTagHasPage = t.has_page; }
+  function cancelEditTag() { editingTagId = null; newTagName = ''; tagIcon = ''; tagImageRef = null; newTagGroupId = null; newTagHasPage = false; }
   function removeTagImage() { tagImageRef = null; }
   async function pickTagImage(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
@@ -788,10 +812,10 @@
     const icon = tagIcon.trim() || null;
     try {
       if (editingTagId === null) {
-        await api.createTag({ name, color: newTagColor, icon, image_ref: tagImageRef, sort_order: tags.length });
+        await api.createTag({ name, color: newTagColor, icon, image_ref: tagImageRef, sort_order: tags.length, group_id: newTagGroupId, has_page: newTagHasPage });
       } else {
         const orig = tags.find((t) => t.id === editingTagId);
-        await api.updateTag(editingTagId, { name, color: newTagColor, icon, image_ref: tagImageRef, description: orig?.description ?? '', sort_order: orig?.sort_order ?? 0 });
+        await api.updateTag(editingTagId, { name, color: newTagColor, icon, image_ref: tagImageRef, description: orig?.description ?? '', sort_order: orig?.sort_order ?? 0, group_id: newTagGroupId, has_page: newTagHasPage, notes: orig?.notes ?? '' });
       }
       cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail();
     } catch (e) { toast(String(e), 'error'); }
@@ -800,6 +824,19 @@
     if (!await confirmDialog('Delete this tag everywhere?', { detail: 'It is removed from every clip and note.', okLabel: 'Delete', danger: true })) return;
     try { await api.deleteTag(id); if (editingTagId === id) cancelEditTag(); await loadTags(); await loadAssets(); await refreshDetail(); } catch (e) { toast(String(e), 'error'); }
   }
+  async function createCategory() {
+    const name = newGroupName.trim();
+    if (!name) return;
+    try { await api.createTagGroup({ name }); newGroupName = ''; await loadTags(); } catch (e) { toast(String(e), 'error'); }
+  }
+  async function deleteCategory(g: TagGroup) {
+    if (!await confirmDialog(`Delete category “${g.name}”?`, { detail: 'Its tags are kept — they just become uncategorised.', okLabel: 'Delete', danger: true })) return;
+    try { await api.deleteTagGroup(g.id); await loadTags(); } catch (e) { toast(String(e), 'error'); }
+  }
+  async function toggleGroupPage(g: TagGroup, on: boolean) {
+    try { await api.updateTagGroup(g.id, { name: g.name, color: g.color, has_page: on, sort_order: g.sort_order }); await loadTags(); }
+    catch (e) { toast(String(e), 'error'); }
+  }
   async function applyTag(tagId: number) {
     if (!detail) return;
     try { await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
@@ -807,6 +844,37 @@
   async function unapplyTag(tagId: number) {
     if (!detail) return;
     try { await api.unapplyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
+  }
+  // A small fixed palette so a freshly-created tag still gets a stable, distinct colour (the user
+  // can recolour it later in the tag manager). Seeded by name so the same nick keeps the same hue.
+  const TAG_PALETTE = ['#ef5b5b', '#f0a64f', '#e8c84d', '#56c271', '#4fb6f0', '#7c8cf0', '#b78bf0', '#f06bb0', '#4fd2c2', '#f08a4f'];
+  function pickTagColor(seed: string): string {
+    let h = 0;
+    for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+    return TAG_PALETTE[h % TAG_PALETTE.length];
+  }
+  async function createTagInline(name: string) {
+    if (!detail) return;
+    const clean = name.trim();
+    if (!clean) return;
+    try {
+      const t = await api.createTag({ name: clean, color: pickTagColor(clean) });
+      await api.applyTag(detail.id, t.id);
+      clipTagSearch = '';
+      await refreshDetail(); await loadTags();
+    } catch (e) { toast(String(e), 'error'); }
+  }
+  // Enter in the picker search applies the best match (exact name first, else first prefix/contains
+  // match); if nothing matches, it creates the tag on the fly. Esc clears + blurs.
+  function onClipTagSearchKey(e: KeyboardEvent, appliedIds: number[]) {
+    if (e.key === 'Escape') { clipTagSearch = ''; (e.target as HTMLInputElement | null)?.blur(); return; }
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const q = clipTagSearch.trim();
+    if (!q) return;
+    const avail = tags.filter((t) => !appliedIds.includes(t.id) && t.name.toLowerCase().includes(q.toLowerCase()));
+    const target = avail.find((t) => t.name.toLowerCase() === q.toLowerCase()) ?? avail[0];
+    if (target) { void applyTag(target.id); clipTagSearch = ''; } else { void createTagInline(q); }
   }
   async function saveGeneralNote() {
     if (!detail) return;
@@ -1399,6 +1467,7 @@
       </div>
       <div class="side">
         <h4>Tags</h4>
+        <!-- Applied tags stay in their own row on top (unchanged), each in its tag colour. -->
         <div class="tagcloud">
           {#each d.tag_ids as id (id)}
             {@const t = tagById.get(id)}
@@ -1406,10 +1475,22 @@
           {/each}
           {#if d.tag_ids.length === 0}<span class="faint">no tags</span>{/if}
         </div>
-        <div class="tagcloud" style:margin-top="6px">
-          {#each tags.filter((t) => !d.tag_ids.includes(t.id)) as t (t.id)}
-            <button class="tagchip" onclick={() => applyTag(t.id)}>+ {@render tagFace(t)} {t.name}</button>
+        <!-- Picker: search-first, every tag shows its colour, grouped by category, create-on-the-fly. -->
+        <div class="tagpicker">
+          <input class="field tagpicker-search" placeholder="Search or create a tag…"
+                 bind:value={clipTagSearch}
+                 onkeydown={(e) => onClipTagSearchKey(e, d.tag_ids)} />
+          {#each groupTags(tags.filter((t) => !d.tag_ids.includes(t.id)), clipTagSearch) as section (section.group?.id ?? 'uncat')}
+            {#if section.group}<div class="tagpicker-cat" style:--c={section.group.color || 'var(--text-3)'}>{section.group.name}</div>{/if}
+            <div class="tagcloud">
+              {#each section.tags as t (t.id)}
+                <button class="tagchip" style:--c={t.color} onclick={() => { applyTag(t.id); clipTagSearch=''; }}>＋ {@render tagFace(t)} {t.name}</button>
+              {/each}
+            </div>
           {/each}
+          {#if clipTagSearch.trim() && !tags.some((t) => t.name.toLowerCase() === clipTagSearch.trim().toLowerCase())}
+            <button class="tagchip create" onclick={() => createTagInline(clipTagSearch)}>＋ Create “{clipTagSearch.trim()}”</button>
+          {/if}
         </div>
         <h4>General note</h4>
         {#if editingGeneralNote}
@@ -1681,19 +1762,37 @@
     <div class="modal">
       <div class="mtop"><h3>Tags</h3><span style:flex="1"></span><button class="btn sm" onclick={() => { showTags = false; cancelEditTag(); }}>Close</button></div>
       <div class="mbody">
+        <!-- Categories: optional, user-created dimensions. Empty by default; the section only matters
+             once you add one. Deleting a category keeps its tags (they become uncategorised). -->
+        <div class="cat-mgr">
+          <div class="cat-head"><b>Categories</b> <span class="faint" style:font-size="11px">optional — group tags into dimensions (e.g. players, maps)</span></div>
+          {#each tagGroups as g (g.id)}
+            <div class="trow"><span class="sw" style:background={g.color || 'var(--text-3)'}></span> <b>{g.name}</b> <span class="faint" style:font-size="11px">{tags.filter((t) => t.group_id === g.id).length} tags</span><span style:flex="1"></span><label class="chk" title="give this category its own hub page"><input type="checkbox" checked={g.has_page} onchange={(e) => toggleGroupPage(g, (e.currentTarget as HTMLInputElement).checked)} /> page</label><button class="x" onclick={() => deleteCategory(g)} title="delete category (its tags become uncategorised)">🗑</button></div>
+          {/each}
+          <div class="trow">
+            <input class="field" style:max-width="180px" placeholder="new category name" bind:value={newGroupName} onkeydown={(e) => { if (e.key === 'Enter') void createCategory(); }} />
+            <button class="btn sm" onclick={createCategory}>+ Category</button>
+          </div>
+        </div>
+        <div class="cat-divider"></div>
         {#each tags as t (t.id)}
-          <div class="trow" class:editing={editingTagId === t.id}><span class="sw" style:background={t.color}></span> <b>{@render tagFace(t)} {t.name}</b> <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => startEditTag(t)} title="edit">✎</button><button class="x" onclick={() => deleteTag(t.id)} title="delete">🗑</button></div>
+          <div class="trow" class:editing={editingTagId === t.id}><span class="sw" style:background={t.color}></span> <b>{@render tagFace(t)} {t.name}</b> {#if t.group_id != null && tagGroupById.get(t.group_id)}<span class="cat-badge">{tagGroupById.get(t.group_id)?.name}</span>{/if}{#if t.has_page}<span class="cat-badge page" title="has its own page">📄</span>{/if} <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => startEditTag(t)} title="edit">✎</button><button class="x" onclick={() => deleteTag(t.id)} title="delete">🗑</button></div>
         {/each}
-        <div class="trow" style:margin-top="8px">
+        <div class="trow" style:margin-top="8px" style:flex-wrap="wrap">
           <input class="field" style:max-width="146px" placeholder={editingTagId === null ? 'new tag name' : 'name'} bind:value={newTagName} />
           <input type="color" bind:value={newTagColor} title="colour" />
           <input class="field" style:max-width="54px" placeholder="icon" maxlength="8" bind:value={tagIcon} disabled={tagImageRef !== null} title="an emoji shown before the name" />
           <label class="btn sm" title="upload an image to use as the icon (a copy is kept by the app)">{uploadingImg ? '…' : '📷'}<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onchange={pickTagImage} style:display="none" /></label>
           {#if tagImageRef}<img class="tagimg tagimg-prev" src="/api/tag-images/{tagImageRef}" alt="" /><button class="x" onclick={removeTagImage} title="remove the image">×</button>{/if}
+          <select class="field" style:max-width="130px" bind:value={newTagGroupId} title="category">
+            <option value={null}>— no category —</option>
+            {#each tagGroups as g (g.id)}<option value={g.id}>{g.name}</option>{/each}
+          </select>
+          <label class="chk" title="give this tag its own page (notes + the clips that carry it)"><input type="checkbox" bind:checked={newTagHasPage} /> page</label>
           <button class="btn sm primary" onclick={saveTag}>{editingTagId === null ? '+ Create' : '💾 Save'}</button>
           {#if editingTagId !== null}<button class="btn sm" onclick={cancelEditTag}>Cancel</button>{/if}
         </div>
-        <p class="faint" style:margin-top="10px" style:font-size="12px">Tags are flat and yours: name + colour + either an emoji or an uploaded image as the icon. Click ✎ to edit a tag; 🗑 deletes it everywhere. Uploaded images are copied into the app's data folder, so deleting the original file is fine.</p>
+        <p class="faint" style:margin-top="10px" style:font-size="12px">Categories are optional and yours — group tags into dimensions (players, maps…) so the picker stays tidy. A tag (or a category) can have its own page: a notes write-up plus every clip that carries it. Click ✎ to edit a tag; 🗑 deletes it everywhere.</p>
       </div>
     </div>
   </div>
@@ -1847,8 +1946,22 @@
   .nav .ct { float: right; font-family: ui-monospace, monospace; font-size: 11px; color: var(--text-3); }
   .sec-title { font-size: 11px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); margin: 12px 0 6px; }
   .tagcloud { display: flex; flex-wrap: wrap; gap: 5px; }
-  .tagchip { padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: var(--bg-3); border: 1px solid var(--border); color: var(--text-2); }
+  .tagchip { --c: var(--text-3); padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600; background: var(--bg-3); border: 1px solid var(--border); border-left: 4px solid var(--c); color: var(--text-2); cursor: pointer; }
+  .tagchip:hover { color: var(--text); border-color: color-mix(in srgb, var(--c) 60%, var(--border)); }
+  .tagchip.create { border-left-color: var(--accent); color: var(--accent); }
+  /* clip-detail tag picker: search box + category sub-headers */
+  .tagpicker { margin-top: 6px; display: flex; flex-direction: column; gap: 6px; }
+  .tagpicker-search { font-size: 12px; padding: 5px 8px; }
+  .tagpicker-cat { --c: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: color-mix(in srgb, var(--c) 75%, var(--text-3)); border-left: 3px solid var(--c); padding-left: 6px; margin-top: 2px; }
   .tagchip:hover { color: var(--text); }
+  /* tag manager: category management + badges */
+  .cat-mgr { display: flex; flex-direction: column; gap: 4px; }
+  .cat-head { display: flex; align-items: baseline; gap: 8px; margin-bottom: 2px; }
+  .cat-divider { height: 1px; background: var(--border); margin: 10px 0; }
+  .cat-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--border); color: var(--text-3); }
+  .cat-badge.page { padding: 1px 4px; }
+  .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); cursor: pointer; }
+  .chk input { accent-color: var(--accent); }
   .tagchip.on { color: #f7f9fb; border-color: transparent; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
   .tagchip .n { font-family: ui-monospace, monospace; font-size: 10px; opacity: .6; }
   .src { font-family: ui-monospace, monospace; font-size: 11px; color: var(--text-2); padding: 3px 0; word-break: break-all; }
