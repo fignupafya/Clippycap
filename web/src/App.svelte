@@ -45,6 +45,12 @@
   let tagGroups = $state<TagGroup[]>([]);
   let tagGroupById = $derived(new Map(tagGroups.map((g) => [g.id, g])));
   let clipTagSearch = $state('');            // search box in the clip detail's tag picker
+  let tagPageId = $state<number | null>(null);   // open a tag's page (dossier): its notes + its clips
+  let tagPageNotes = $state('');                 // editable notes body on the open tag page (autosaves)
+  let tagPageNotesTimer: ReturnType<typeof setTimeout> | null = null;
+  let tagPage = $derived(tagPageId != null ? (tagById.get(tagPageId) ?? null) : null);
+  let categoryPageId = $state<number | null>(null);  // open a category's hub page (directory of its tags)
+  let categoryPage = $derived(categoryPageId != null ? (tagGroupById.get(categoryPageId) ?? null) : null);
   let sources = $state<Source[]>([]);
 
   // Group a list of tags into category sections for the picker / sidebar. Categories come in their
@@ -837,6 +843,26 @@
     try { await api.updateTagGroup(g.id, { name: g.name, color: g.color, has_page: on, sort_order: g.sort_order }); await loadTags(); }
     catch (e) { toast(String(e), 'error'); }
   }
+  // Tag page (dossier): the notes write-up + the clips carrying the tag (the grid, filtered to it).
+  function openTagPage(t: Tag) {
+    closeDetail(); showTags = false; categoryPageId = null;
+    tagPageId = t.id; tagPageNotes = t.notes;
+    quick = 'all'; filterTagIds = [t.id]; folderFilter = null; page = 1;
+  }
+  function closeTagPage() { tagPageId = null; filterTagIds = []; }
+  function onTagPageNotesInput() {
+    if (tagPageNotesTimer) clearTimeout(tagPageNotesTimer);
+    const id = tagPageId;
+    const body = tagPageNotes;
+    tagPageNotesTimer = setTimeout(() => {
+      if (id != null) void api.setTagNotes(id, body).then(() => loadTags()).catch((e) => toast(String(e), 'error'));
+    }, 600);
+  }
+  // Category page (hub): a directory of the category's tags; click one to open its dossier.
+  function openCategoryPage(g: TagGroup) {
+    closeDetail(); showTags = false; tagPageId = null; categoryPageId = g.id;
+  }
+  function closeCategoryPage() { categoryPageId = null; }
   async function applyTag(tagId: number) {
     if (!detail) return;
     try { await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
@@ -1300,7 +1326,14 @@
       {/if}
       <div class="sec-title">Tags</div>
       {#each groupTags(tags, '') as section (section.group?.id ?? 'uncat')}
-        {#if section.group}<div class="cat-sub" style:--c={section.group.color || 'var(--text-3)'}>{section.group.name}</div>{/if}
+        {#if section.group}
+          {@const g = section.group}
+          {#if g.has_page}
+            <button class="cat-sub cat-sub-link" style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)} title="open this category's hub page">{g.name} ↗</button>
+          {:else}
+            <div class="cat-sub" style:--c={g.color || 'var(--text-3)'}>{g.name}</div>
+          {/if}
+        {/if}
         <div class="tagcloud" style:margin-bottom="6px">
           {#each section.tags as t (t.id)}
             <button class="tagchip" class:on={filterTagIds.includes(t.id)} style:--c={t.color} style:background={filterTagIds.includes(t.id) ? t.color : ''} onclick={() => toggleTagFilter(t.id)}>
@@ -1318,6 +1351,36 @@
     <main>
       <div class="lib-scroll" bind:this={gridScroll}>
       {#if error}<div class="err">{error}</div>{/if}
+      {#if tagPage}
+        <!-- Tag page (dossier): notes write-up; the grid below is filtered to this tag's clips. -->
+        <div class="tagpage" style:--c={tagPage.color}>
+          <div class="tagpage-head">
+            <button class="btn sm" onclick={closeTagPage}>← Library</button>
+            <span class="tagpage-title">{@render tagFace(tagPage)} {tagPage.name}</span>
+            <span class="faint" style:font-size="12px">{total} clip{total === 1 ? '' : 's'}</span>
+          </div>
+          <textarea class="field tagpage-notes" rows="3"
+                    placeholder="Notes about “{tagPage.name}” — evaluation, patterns, @mention example clips…"
+                    bind:value={tagPageNotes} oninput={onTagPageNotesInput}></textarea>
+        </div>
+      {/if}
+      {#if categoryPage}
+        {@const cat = categoryPage}
+        <!-- Category hub: a directory of the category's tags; click one to open its dossier. -->
+        <div class="tagpage" style:--c={cat.color || 'var(--accent)'}>
+          <div class="tagpage-head">
+            <button class="btn sm" onclick={closeCategoryPage}>← Library</button>
+            <span class="tagpage-title">{cat.name}</span>
+            <span class="faint" style:font-size="12px">{tags.filter((t) => t.group_id === cat.id).length} tags</span>
+          </div>
+          <div class="tagcloud">
+            {#each tags.filter((t) => t.group_id === cat.id) as t (t.id)}
+              <button class="tagchip" style:--c={t.color} onclick={() => (t.has_page ? openTagPage(t) : (closeCategoryPage(), toggleTagFilter(t.id)))}>{@render tagFace(t)} {t.name} <span class="n">{t.asset_count ?? 0}</span></button>
+            {/each}
+            {#if tags.filter((t) => t.group_id === cat.id).length === 0}<span class="faint" style:font-size="12px">No tags in this category yet.</span>{/if}
+          </div>
+        </div>
+      {/if}
       {#if selected.size > 0}
         <div class="bulkbar">
           <b>{selected.size}</b> selected
@@ -1770,7 +1833,7 @@
         <div class="cat-mgr">
           <div class="cat-head"><b>Categories</b> <span class="faint" style:font-size="11px">optional — group tags into dimensions (e.g. players, maps)</span></div>
           {#each tagGroups as g (g.id)}
-            <div class="trow"><span class="sw" style:background={g.color || 'var(--text-3)'}></span> <b>{g.name}</b> <span class="faint" style:font-size="11px">{tags.filter((t) => t.group_id === g.id).length} tags</span><span style:flex="1"></span><label class="chk" title="give this category its own hub page"><input type="checkbox" checked={g.has_page} onchange={(e) => toggleGroupPage(g, (e.currentTarget as HTMLInputElement).checked)} /> page</label><button class="x" onclick={() => deleteCategory(g)} title="delete category (its tags become uncategorised)">🗑</button></div>
+            <div class="trow"><span class="sw" style:background={g.color || 'var(--text-3)'}></span> {#if g.has_page}<button class="namelink" onclick={() => openCategoryPage(g)} title="open this category's hub page">{g.name} ↗</button>{:else}<b>{g.name}</b>{/if} <span class="faint" style:font-size="11px">{tags.filter((t) => t.group_id === g.id).length} tags</span><span style:flex="1"></span><label class="chk" title="give this category its own hub page"><input type="checkbox" checked={g.has_page} onchange={(e) => toggleGroupPage(g, (e.currentTarget as HTMLInputElement).checked)} /> page</label><button class="x" onclick={() => deleteCategory(g)} title="delete category (its tags become uncategorised)">🗑</button></div>
           {/each}
           <div class="trow">
             <input class="field" style:max-width="180px" placeholder="new category name" bind:value={newGroupName} onkeydown={(e) => { if (e.key === 'Enter') void createCategory(); }} />
@@ -1779,7 +1842,7 @@
         </div>
         <div class="cat-divider"></div>
         {#each tags as t (t.id)}
-          <div class="trow" class:editing={editingTagId === t.id}><span class="sw" style:background={t.color}></span> <b>{@render tagFace(t)} {t.name}</b> {#if t.group_id != null && tagGroupById.get(t.group_id)}<span class="cat-badge">{tagGroupById.get(t.group_id)?.name}</span>{/if}{#if t.has_page}<span class="cat-badge page" title="has its own page">📄</span>{/if} <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => startEditTag(t)} title="edit">✎</button><button class="x" onclick={() => deleteTag(t.id)} title="delete">🗑</button></div>
+          <div class="trow" class:editing={editingTagId === t.id}><span class="sw" style:background={t.color}></span> {#if t.has_page}<button class="namelink" onclick={() => openTagPage(t)} title="open this tag's page">{@render tagFace(t)} {t.name} ↗</button>{:else}<b>{@render tagFace(t)} {t.name}</b>{/if} {#if t.group_id != null && tagGroupById.get(t.group_id)}<span class="cat-badge">{tagGroupById.get(t.group_id)?.name}</span>{/if} <span class="faint" style:font-size="11px">{t.asset_count ?? 0} clips</span><span style:flex="1"></span><button class="x" onclick={() => startEditTag(t)} title="edit">✎</button><button class="x" onclick={() => deleteTag(t.id)} title="delete">🗑</button></div>
         {/each}
         <div class="trow" style:margin-top="8px" style:flex-wrap="wrap">
           <input class="field" style:max-width="146px" placeholder={editingTagId === null ? 'new tag name' : 'name'} bind:value={newTagName} />
@@ -1964,6 +2027,15 @@
   .cat-badge { font-size: 10px; font-weight: 600; padding: 1px 6px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--border); color: var(--text-3); }
   .cat-badge.page { padding: 1px 4px; }
   .cat-sub { --c: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: color-mix(in srgb, var(--c) 70%, var(--text-3)); border-left: 3px solid var(--c); padding-left: 6px; margin: 4px 0 3px; }
+  .cat-sub-link { display: block; width: 100%; text-align: left; background: transparent; border: none; border-left: 3px solid var(--c); cursor: pointer; }
+  .cat-sub-link:hover { color: var(--accent); }
+  .namelink { background: transparent; border: none; padding: 0; font-weight: 700; font-size: inherit; color: var(--text); cursor: pointer; }
+  .namelink:hover { color: var(--accent); }
+  /* tag/category page: a header banner above the (filtered) library grid */
+  .tagpage { --c: var(--accent); border: 1px solid var(--border); border-left: 4px solid var(--c); border-radius: 8px; background: var(--bg-2); padding: 10px 12px; margin-bottom: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .tagpage-head { display: flex; align-items: center; gap: 10px; }
+  .tagpage-title { font-size: 16px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
+  .tagpage-notes { resize: vertical; font-size: 13px; }
   .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); cursor: pointer; }
   .chk input { accent-color: var(--accent); }
   .tagchip.on { color: #f7f9fb; border-color: transparent; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
