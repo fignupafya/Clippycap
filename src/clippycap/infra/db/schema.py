@@ -272,6 +272,20 @@ _MIGRATION_V9 = (
 )
 
 
+# v10: DIRECT clip<->category membership. A clip can belong to a category WITHOUT carrying a tag in
+# it (the previous, tag-derived membership still applies on top). Cascades on both sides so deleting
+# a clip or a category cleans up its rows.
+_MIGRATION_V10 = (
+    "CREATE TABLE asset_categories ("
+    " asset_id    INTEGER NOT NULL REFERENCES assets(id)     ON DELETE CASCADE,"
+    " category_id INTEGER NOT NULL REFERENCES tag_groups(id) ON DELETE CASCADE,"
+    " added_at    TEXT NOT NULL,"
+    " PRIMARY KEY (asset_id, category_id)"
+    ");\n"
+    "CREATE INDEX idx_asset_categories_cat ON asset_categories(category_id);"
+)
+
+
 # A migration step is SQL (run with executescript) or a callable for data migrations needing logic.
 MigrationStep = str | Callable[[sqlite3.Connection], None]
 
@@ -285,5 +299,6 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (7, _MIGRATION_V7),
     (8, _MIGRATION_V8),
     (9, _MIGRATION_V9),
+    (10, _MIGRATION_V10),
 )
 LATEST_VERSION: int = MIGRATIONS[-1][0]

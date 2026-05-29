@@ -128,7 +128,7 @@ def _source_dict(src: Source) -> dict[str, Any]:
 
 def _detail_dict(detail: AssetDetail) -> dict[str, Any]:
     return {
-        **_asset_dict(detail.asset), "tag_ids": detail.tag_ids,
+        **_asset_dict(detail.asset), "tag_ids": detail.tag_ids, "category_ids": detail.category_ids,
         "paths": [{"path": p.path, "present": p.present, "volume_id": p.volume_id} for p in detail.paths],
         "general_note": detail.general_note.body if detail.general_note is not None else None,
         "general_note_id": detail.general_note.id if detail.general_note is not None else None,
@@ -282,12 +282,13 @@ class ExtractSegmentBody(BaseModel):
 def _filter_from_query(  # noqa: PLR0913 -- one keyword per independent filter is the point
     *, tags_all: list[int], tags_any: list[int], tags_none: list[int], untagged: bool,
     text: str | None, only_missing: bool, never_opened: bool, media_type: str | None,
-    path_under: str | None = None,
+    path_under: str | None = None, in_categories: list[int] | None = None,
 ) -> AssetFilter:
     return AssetFilter(
         tags_all=list(tags_all), tags_any=list(tags_any), tags_none=list(tags_none),
         untagged_only=untagged, text=text or None, only_missing=only_missing,
         never_opened=never_opened, media_type=media_type, path_under=path_under,
+        in_categories=list(in_categories or []),
     )
 
 
@@ -344,6 +345,7 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         never_opened: bool = False,
         media_type: str | None = None,
         path_under: str | None = None,
+        in_categories: Annotated[list[int], Query()] = [],  # noqa: B006
         sort: str = "recorded_desc",
         offset: int = 0,
         limit: Annotated[int, Query(ge=1, le=500)] = 100,
@@ -351,7 +353,7 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         criteria = _filter_from_query(
             tags_all=tags_all, tags_any=tags_any, tags_none=tags_none, untagged=untagged,
             text=text, only_missing=only_missing, never_opened=never_opened, media_type=media_type,
-            path_under=path_under,
+            path_under=path_under, in_categories=in_categories,
         )
         page = app.assets.list_assets(filter=criteria, sort_key=sort, offset=offset, limit=limit)
         return {"items": [_summary_dict(s) for s in page.items], "total": page.total,
@@ -369,6 +371,7 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         never_opened: bool = False,
         media_type: str | None = None,
         path_under: str | None = None,
+        in_categories: Annotated[list[int], Query()] = [],  # noqa: B006
         sort: str = "added_desc",
     ) -> list[int]:
         """Every asset id matching the filter (no pagination). The frontend uses this for the
@@ -376,7 +379,7 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         criteria = _filter_from_query(
             tags_all=tags_all, tags_any=tags_any, tags_none=tags_none, untagged=untagged,
             text=text, only_missing=only_missing, never_opened=never_opened, media_type=media_type,
-            path_under=path_under,
+            path_under=path_under, in_categories=in_categories,
         )
         return app.assets.all_matching_ids(filter=criteria, sort_key=sort)
 
@@ -631,6 +634,17 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     @api.delete("/api/assets/{asset_id}/tags/{tag_id}", status_code=204)
     def unapply_tag(app: AppDep, asset_id: int, tag_id: int) -> Response:
         app.tags.remove_from_asset(asset_id, tag_id)
+        return Response(status_code=204)
+
+    @api.post("/api/assets/{asset_id}/categories/{category_id}", status_code=204)
+    def add_asset_category(app: AppDep, asset_id: int, category_id: int) -> Response:
+        """Assign a clip DIRECTLY to a category -- no tag needed."""
+        app.assets.add_category(asset_id, category_id)
+        return Response(status_code=204)
+
+    @api.delete("/api/assets/{asset_id}/categories/{category_id}", status_code=204)
+    def remove_asset_category(app: AppDep, asset_id: int, category_id: int) -> Response:
+        app.assets.remove_category(asset_id, category_id)
         return Response(status_code=204)
 
     # ---- notes (by id) ---------------------------------------------------

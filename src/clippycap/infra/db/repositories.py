@@ -230,7 +230,7 @@ class SqliteAssetRepository(_Repo):
     def set_missing(self, asset_id: int, missing: bool) -> None:
         self._c.execute("UPDATE assets SET missing = ? WHERE id = ?", (1 if missing else 0, asset_id))
 
-    def search(
+    def search(  # noqa: PLR0915 -- one statement per independent filter clause; splitting would obscure it
         self, *, filter: AssetFilter, sort_key: str, offset: int, limit: int
     ) -> tuple[list[Asset], int]:
         order = _SORT_CLAUSES.get(sort_key)
@@ -278,6 +278,17 @@ class SqliteAssetRepository(_Repo):
             params.append(f.path_under)
             params.append(escaped + "\\%")
             params.append(escaped + "/%")
+        if f.in_categories:
+            # "in a category" = a DIRECT membership OR carrying a tag whose group is in the set.
+            # Callers pass the whole subtree of category ids, so nesting rolls up.
+            slots = ",".join("?" * len(f.in_categories))
+            where.append(
+                f"(EXISTS (SELECT 1 FROM asset_categories ac WHERE ac.asset_id = a.id "
+                f"AND ac.category_id IN ({slots})) OR EXISTS (SELECT 1 FROM asset_tags x "
+                f"JOIN tags t ON t.id = x.tag_id WHERE x.asset_id = a.id AND t.group_id IN ({slots})))"
+            )
+            params.extend(f.in_categories)
+            params.extend(f.in_categories)
         if f.text:
             fts = _fts_query(f.text)
             if fts:
@@ -385,6 +396,26 @@ class SqliteAssetRepository(_Repo):
             "SELECT COUNT(*) AS n FROM asset_paths WHERE asset_id = ? AND present = 1", (asset_id,)
         ).fetchone()["n"]
         return int(n) == 0
+
+    # ---- direct clip <-> category membership (independent of tags) ----
+    def add_category(self, asset_id: int, category_id: int) -> bool:
+        cur = self._c.execute(
+            "INSERT OR IGNORE INTO asset_categories(asset_id, category_id, added_at) VALUES (?,?,?)",
+            (asset_id, category_id, _now()),
+        )
+        return cur.rowcount > 0
+
+    def remove_category(self, asset_id: int, category_id: int) -> bool:
+        cur = self._c.execute(
+            "DELETE FROM asset_categories WHERE asset_id = ? AND category_id = ?", (asset_id, category_id)
+        )
+        return cur.rowcount > 0
+
+    def category_ids_for_asset(self, asset_id: int) -> list[int]:
+        rows = self._c.execute(
+            "SELECT category_id FROM asset_categories WHERE asset_id = ? ORDER BY category_id", (asset_id,)
+        ).fetchall()
+        return [r["category_id"] for r in rows]
 
 
 # --------------------------------------------------------------------------- tags

@@ -29,3 +29,7 @@ class AssetFilter:
     never_opened: bool = False                           # the "new" view (last_opened_at IS NULL)
     # the "folder view" filter -- match assets reachable at this exact folder OR any descendant.
     path_under: str | None = None
+    # the "category" filter -- match assets that are in ANY of these categories, where "in a
+    # category" means a DIRECT membership (asset_categories) OR carrying a tag whose group is one
+    # of these. Callers pass the whole subtree of category ids so nesting rolls up.
+    in_categories: list[int] = field(default_factory=list)

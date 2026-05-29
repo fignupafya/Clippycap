@@ -45,6 +45,7 @@
   let tagGroups = $state<TagGroup[]>([]);
   let tagGroupById = $derived(new Map(tagGroups.map((g) => [g.id, g])));
   let clipTagSearch = $state('');            // search box in the clip detail's tag picker
+  let clipCatPickerOpen = $state(false);     // the clip-detail "add to category" picker dropdown
   let tagPageId = $state<number | null>(null);   // open a tag's page (dossier): its notes + its clips
   let tagPageNotes = $state('');                 // editable notes body on the open tag page (autosaves)
   let tagPageNotesTimer: ReturnType<typeof setTimeout> | null = null;
@@ -270,13 +271,10 @@
   async function loadAssets() {
     loading = true; error = null;
     try {
-      const catTags = categoryFilterTagIds();
-      if (catTags !== null && catTags.length === 0) {        // category filter active but the category has no tagged clips
-        assets = []; total = 0; loading = false; return;
-      }
+      const catIds = categoryFilterIds();
       const resp = await api.listAssets({
-        tags_all: catTags === null ? filterTagIds : undefined,
-        tags_any: catTags ?? undefined,
+        tags_all: catIds === null ? filterTagIds : undefined,
+        in_categories: catIds ?? undefined,
         untagged: quick === 'untagged', never_opened: quick === 'new',
         text: appliedText.trim() || undefined, sort,
         path_under: folderFilter ?? undefined,
@@ -457,11 +455,6 @@
     for (const g of tagGroups) if (g.parent_id === catId) out.push(...categoryDescendantIds(g.id));
     return out;
   }
-  // Tag ids living in a category's whole subtree (the category + all nested sub-categories).
-  function tagIdsInCategorySubtree(catId: number): number[] {
-    const cats = new Set(categoryDescendantIds(catId));
-    return tags.filter((t) => t.group_id != null && cats.has(t.group_id)).map((t) => t.id);
-  }
   function categoryAncestorIds(catId: number): number[] {
     const out: number[] = [];
     const seen = new Set<number>();
@@ -469,20 +462,21 @@
     while (cur != null && !seen.has(cur)) { seen.add(cur); out.push(cur); cur = tagGroupById.get(cur)?.parent_id ?? null; }
     return out;
   }
-  // A clip's categories are DERIVED from its tags: each tag's category plus that category's ancestors
-  // (so a clip tagged with a tag in "Players > Scout_main" shows under both). No stored membership.
-  function clipCategories(tagIds: number[]): TagGroup[] {
+  // A clip's EFFECTIVE categories = the ones it's directly assigned to (no tag needed) PLUS each of
+  // its tags' categories -- and, for both, all ancestor categories (so a clip in "Players > Scout_main"
+  // shows under both). `directIds` come from the clip's detail.category_ids.
+  function clipCategories(tagIds: number[], directIds: number[] = []): TagGroup[] {
     const ids = new Set<number>();
-    for (const tid of tagIds) {
-      const gid = tagById.get(tid)?.group_id;
-      if (gid != null) { ids.add(gid); for (const a of categoryAncestorIds(gid)) ids.add(a); }
-    }
+    const include = (gid: number) => { ids.add(gid); for (const a of categoryAncestorIds(gid)) ids.add(a); };
+    for (const cid of directIds) include(cid);
+    for (const tid of tagIds) { const gid = tagById.get(tid)?.group_id; if (gid != null) include(gid); }
     return [...ids].map((id) => tagGroupById.get(id)).filter((g): g is TagGroup => g != null)
       .sort((a, b) => a.sort_order - b.sort_order);
   }
-  // null => no category filter; [] => filtering an empty category (=> show nothing).
-  function categoryFilterTagIds(): number[] | null {
-    return filterCategoryId == null ? null : tagIdsInCategorySubtree(filterCategoryId);
+  // The category-filter is the whole subtree of category ids (the category + nested sub-categories);
+  // the backend matches a clip in ANY of them, whether by a DIRECT membership or by a tag. null => off.
+  function categoryFilterIds(): number[] | null {
+    return filterCategoryId == null ? null : categoryDescendantIds(filterCategoryId);
   }
   function selectFolder(path: string | null) {
     folderFilter = path;
@@ -497,11 +491,10 @@
   function selectAllVisible() { selected = new Set(assets.map((a) => a.id)); lastSelectedId = assets.at(-1)?.id ?? null; }
   async function selectAllMatching() {
     try {
-      const catTags = categoryFilterTagIds();
-      if (catTags !== null && catTags.length === 0) { selected = new Set(); lastSelectedId = null; return; }
+      const catIds = categoryFilterIds();
       const ids = await api.listAssetIds({
-        tags_all: catTags === null ? filterTagIds : undefined,
-        tags_any: catTags ?? undefined,
+        tags_all: catIds === null ? filterTagIds : undefined,
+        in_categories: catIds ?? undefined,
         untagged: quick === 'untagged', never_opened: quick === 'new',
         text: appliedText.trim() || undefined, sort, path_under: folderFilter ?? undefined,
       });
@@ -939,6 +932,16 @@
     if (!detail) return;
     try { await api.unapplyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
   }
+  // Add/remove a DIRECT clip<->category membership (no tag needed). Tag-derived membership is separate
+  // and not removable here (remove the tag instead).
+  async function toggleClipCategory(catId: number) {
+    if (!detail) return;
+    const isDirect = detail.category_ids.includes(catId);
+    try {
+      if (isDirect) await api.unassignCategory(detail.id, catId); else await api.assignCategory(detail.id, catId);
+      await refreshDetail(); await loadAssets();
+    } catch (e) { toast(String(e), 'error'); }
+  }
   // A small fixed palette so a freshly-created tag still gets a stable, distinct colour (the user
   // can recolour it later in the tag manager). Seeded by name so the same nick keeps the same hue.
   const TAG_PALETTE = ['#ef5b5b', '#f0a64f', '#e8c84d', '#56c271', '#4fb6f0', '#7c8cf0', '#b78bf0', '#f06bb0', '#4fd2c2', '#f08a4f'];
@@ -1126,6 +1129,7 @@
     const target = e.target as HTMLElement | null;
     if (tagDropdownNoteId !== null && !(target && (target.closest('.tag-dropdown') || target.closest('.add-tag-btn')))) closeTagDropdown();
     if (mention !== null && !(target && (target.closest('.mention-dropdown') || target === mention.el))) mention = null;
+    if (clipCatPickerOpen && !(target && target.closest('.clipcat-add'))) clipCatPickerOpen = false;
   }
   // Adding ~half a frame keeps the seek target solidly inside that frame's presentation window, so
   // millisecond rounding (in the stored timestamp, or after a trim's shift) can't land us a frame early.
@@ -1619,15 +1623,25 @@
         </div>
       </div>
       <div class="side">
-        {#if clipCategories(d.tag_ids).length}
-          <!-- Categories this clip belongs to -- DERIVED from its tags (a tag in category X => the
-               clip is in X, and in X's parents). Click a badge to open that category's page. -->
-          <div class="clip-cats" title="categories this clip is in (from its tags)">
-            {#each clipCategories(d.tag_ids) as g (g.id)}
-              <button class="cat-badge cat-badge-link" style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)}>📁 {g.name}</button>
-            {/each}
+        <!-- Categories this clip is in: DIRECT memberships (assigned here, no tag) + ones derived
+             from its tags (+ their parents). Solid badge = direct (removable via the picker); faint
+             = via a tag. The 📁+ button assigns the clip directly to any category, no tag needed. -->
+        <div class="clip-cats">
+          {#each clipCategories(d.tag_ids, d.category_ids) as g (g.id)}
+            <button class="cat-badge cat-badge-link" class:direct={d.category_ids.includes(g.id)} style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)} title={d.category_ids.includes(g.id) ? 'directly in this category — click to open its page' : 'in this category via a tag — click to open its page'}>📁 {g.name}</button>
+          {/each}
+          <div class="clipcat-add">
+            <button class="cat-add-btn" onclick={() => (clipCatPickerOpen = !clipCatPickerOpen)} title="add this clip to a category (no tag needed)">📁+</button>
+            {#if clipCatPickerOpen}
+              <div class="cat-picker">
+                {#if tagGroups.length === 0}<div class="faint" style:padding="6px" style:font-size="12px">No categories yet — create one in Tags.</div>{/if}
+                {#each tagGroups as g (g.id)}
+                  <button class="cat-picker-row" class:on={d.category_ids.includes(g.id)} style:--c={g.color || 'var(--text-3)'} onclick={() => toggleClipCategory(g.id)}><span class="ck">{d.category_ids.includes(g.id) ? '✓' : ''}</span> 📁 {g.name}</button>
+                {/each}
+              </div>
+            {/if}
           </div>
-        {/if}
+        </div>
         <h4>Tags</h4>
         <!-- Applied tags stay in their own row on top (unchanged), each in its tag colour. -->
         <div class="tagcloud">
@@ -2134,9 +2148,18 @@
   .cat-sub-filter.on { color: var(--accent); background: var(--bg-2); }
   .cat-sub-go { background: transparent; border: none; color: var(--text-3); font-size: 11px; cursor: pointer; padding: 0 4px; }
   .cat-sub-go:hover { color: var(--accent); }
-  .clip-cats { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; }
-  .cat-badge-link { --c: var(--text-3); cursor: pointer; border-left: 3px solid var(--c); }
-  .cat-badge-link:hover { color: var(--accent); border-color: var(--accent); }
+  .clip-cats { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 8px; align-items: center; }
+  .cat-badge-link { --c: var(--text-3); cursor: pointer; border-left: 3px solid var(--c); opacity: .65; }
+  .cat-badge-link.direct { opacity: 1; }                 /* solid = directly assigned; faint = via a tag */
+  .cat-badge-link:hover { color: var(--accent); border-color: var(--accent); opacity: 1; }
+  .clipcat-add { position: relative; }
+  .cat-add-btn { background: transparent; border: 1px dashed var(--border); border-radius: 999px; padding: 1px 7px; font-size: 11px; color: var(--text-3); cursor: pointer; }
+  .cat-add-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .cat-picker { position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 30; min-width: 180px; max-height: 260px; overflow: auto; background: var(--bg-2); border: 1px solid var(--border); border-radius: 8px; padding: 4px; box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+  .cat-picker-row { --c: var(--text-3); display: block; width: 100%; text-align: left; background: transparent; border: none; border-left: 3px solid var(--c); padding: 4px 8px; font-size: 12px; color: var(--text-2); cursor: pointer; border-radius: 0 4px 4px 0; }
+  .cat-picker-row:hover { background: var(--bg-3); color: var(--text); }
+  .cat-picker-row.on { color: var(--accent); }
+  .cat-picker-row .ck { display: inline-block; width: 12px; color: var(--accent); }
   .namelink { background: transparent; border: none; padding: 0; font-weight: 700; font-size: inherit; color: var(--text); cursor: pointer; }
   .namelink:hover { color: var(--accent); }
   /* tag/category page: a header banner above the (filtered) library grid */

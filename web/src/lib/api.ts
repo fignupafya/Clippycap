@@ -14,6 +14,7 @@ export interface Note {
   timestamp_ms: number | null; end_timestamp_ms?: number | null; tag_ids: number[];
 }
 export interface AssetDetail extends AssetSummary {
+  category_ids: number[];                      // categories this clip is DIRECTLY assigned to (no tag needed)
   paths: { path: string; present: boolean; volume_id: string | null }[];
   general_note: string | null; general_note_id: number | null; timestamped_notes: Note[];
   mentioned_assets: Record<string, string>;   // "@{id}"-mentioned clips in this asset's notes -> title
@@ -74,6 +75,7 @@ interface AssetQuery {
   tags_all?: number[]; tags_any?: number[]; untagged?: boolean; text?: string;
   never_opened?: boolean; only_missing?: boolean; sort?: string; offset?: number; limit?: number;
   path_under?: string;       // folder filter: clips whose path is this folder or any descendant
+  in_categories?: number[];  // category filter: clips directly in OR tagged into any of these categories
 }
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
@@ -120,6 +122,9 @@ export const api = {
   renameFile: (id: number, name: string) => req<{ id: number; title: string }>('POST', `/api/assets/${id}/rename-file`, { name }),
   applyTag: (assetId: number, tagId: number) => req<void>('POST', `/api/assets/${assetId}/tags/${tagId}`),
   unapplyTag: (assetId: number, tagId: number) => req<void>('DELETE', `/api/assets/${assetId}/tags/${tagId}`),
+  // direct clip<->category membership (no tag needed)
+  assignCategory: (assetId: number, catId: number) => req<void>('POST', `/api/assets/${assetId}/categories/${catId}`),
+  unassignCategory: (assetId: number, catId: number) => req<void>('DELETE', `/api/assets/${assetId}/categories/${catId}`),
   setGeneralNote: (assetId: number, body: string) => req<Note>('PUT', `/api/assets/${assetId}/notes/general`, { body }),
   addTimestampNote: (assetId: number, timestamp_ms: number, body: string, end_timestamp_ms?: number) =>
     req<Note>('POST', `/api/assets/${assetId}/notes`, { timestamp_ms, body, end_timestamp_ms }),

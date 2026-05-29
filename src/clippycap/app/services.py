@@ -73,6 +73,7 @@ class NoteView:
 class AssetDetail:
     asset: Asset
     tag_ids: list[int]
+    category_ids: list[int]                   # categories this clip is DIRECTLY assigned to (no tag needed)
     paths: list[AssetPath]
     general_note: Note | None
     timestamped_notes: list[NoteView]
@@ -151,6 +152,7 @@ class AssetService:
         with self._db.transaction() as uow:
             asset = _require(uow.assets.get(asset_id), "asset", asset_id)
             tag_ids = uow.tags.tag_ids_for_asset(asset_id)
+            category_ids = uow.assets.category_ids_for_asset(asset_id)
             paths = uow.assets.get_paths(asset_id)
             general = uow.notes.general_note(asset_id)
             all_notes = uow.notes.list_for_asset(asset_id)
@@ -178,9 +180,22 @@ class AssetService:
                                     "clip_id": mid, "body": tnote.body, "timestamp_ms": tnote.timestamp_ms,
                                 }
         return AssetDetail(
-            asset=asset, tag_ids=tag_ids, paths=paths, general_note=general,
+            asset=asset, tag_ids=tag_ids, category_ids=category_ids, paths=paths, general_note=general,
             timestamped_notes=timestamped, mentioned=mentioned, mentioned_notes=mentioned_notes,
         )
+
+    def add_category(self, asset_id: int, category_id: int) -> None:
+        """Assign a clip DIRECTLY to a category (no tag needed)."""
+        with self._db.transaction() as uow:
+            _require(uow.assets.get(asset_id), "asset", asset_id)
+            _require(uow.tag_groups.get(category_id), "tag category", category_id)
+            uow.assets.add_category(asset_id, category_id)
+        self._bus.publish(AssetUpdated(asset_id=asset_id))
+
+    def remove_category(self, asset_id: int, category_id: int) -> None:
+        with self._db.transaction() as uow:
+            uow.assets.remove_category(asset_id, category_id)
+        self._bus.publish(AssetUpdated(asset_id=asset_id))
 
     def get(self, asset_id: int) -> Asset | None:
         with self._db.transaction() as uow:
