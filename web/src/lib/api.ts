@@ -28,6 +28,8 @@ export interface Tag {
 }
 export interface TagGroup {
   id: number; name: string; color: string; sort_order: number; has_page: boolean;
+  parent_id: number | null;   // nest under another category; null => top-level
+  notes: string;              // markdown body shown on the category's page
 }
 export interface ReferenceType { id: number; name: string; reverse_name: string | null; color: string; sort_order: number; }
 export interface ReferenceView {
@@ -150,8 +152,9 @@ export const api = {
   deleteTag: (id: number) => req<void>('DELETE', `/api/tags/${id}`),
   // tag categories (groups) -- user-created; the library starts with none.
   listTagGroups: () => req<TagGroup[]>('GET', '/api/tag-groups'),
-  createTagGroup: (g: { name: string; color?: string; has_page?: boolean }) => req<TagGroup>('POST', '/api/tag-groups', g),
-  updateTagGroup: (id: number, g: { name: string; color: string; has_page: boolean; sort_order: number }) => req<TagGroup>('PUT', `/api/tag-groups/${id}`, g),
+  createTagGroup: (g: { name: string; color?: string; has_page?: boolean; parent_id?: number | null }) => req<TagGroup>('POST', '/api/tag-groups', g),
+  updateTagGroup: (id: number, g: { name: string; color: string; has_page: boolean; sort_order: number; parent_id: number | null }) => req<TagGroup>('PUT', `/api/tag-groups/${id}`, g),
+  setTagGroupNotes: (id: number, notes: string) => req<TagGroup>('PUT', `/api/tag-groups/${id}/notes`, { notes }),
   deleteTagGroup: (id: number) => req<void>('DELETE', `/api/tag-groups/${id}`),
   reorderTagGroups: (ids: number[]) => req<void>('POST', '/api/tag-groups/reorder', { ids }),
   uploadTagImage: async (file: File): Promise<{ image_ref: string }> => {

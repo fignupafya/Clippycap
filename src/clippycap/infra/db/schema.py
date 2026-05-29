@@ -260,6 +260,18 @@ _MIGRATION_V8 = (
 )
 
 
+# v9: categories become navigable, editable, nestable. `parent_id` lets a category sit under another
+# (e.g. a per-player category under a "Players" umbrella) -- ON DELETE SET NULL so deleting a parent
+# just promotes its children to top-level rather than destroying them. `notes` gives a category its
+# own editable page body (the same free-form write-up tags already have). Both additive + empty by
+# default, so existing flat categories are unaffected.
+_MIGRATION_V9 = (
+    "ALTER TABLE tag_groups ADD COLUMN parent_id INTEGER REFERENCES tag_groups(id) ON DELETE SET NULL;\n"
+    "ALTER TABLE tag_groups ADD COLUMN notes TEXT NOT NULL DEFAULT '';\n"
+    "CREATE INDEX idx_tag_groups_parent ON tag_groups(parent_id);"
+)
+
+
 # A migration step is SQL (run with executescript) or a callable for data migrations needing logic.
 MigrationStep = str | Callable[[sqlite3.Connection], None]
 
@@ -272,5 +284,6 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (6, _migration_v6_titles_from_filenames),
     (7, _MIGRATION_V7),
     (8, _MIGRATION_V8),
+    (9, _MIGRATION_V9),
 )
 LATEST_VERSION: int = MIGRATIONS[-1][0]

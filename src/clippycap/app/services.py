@@ -460,34 +460,67 @@ class TagGroupService:
             return uow.tag_groups.list_all()
 
     def create(self, *, name: str, color: str = "", has_page: bool = False,
+               parent_id: int | None = None, notes: str = "",
                sort_order: int | None = None) -> TagGroup:
         clean = name.strip()
         if not clean:
             raise InvalidInputError("a category needs a name")
         with self._db.transaction() as uow:
+            if parent_id is not None and uow.tag_groups.get(parent_id) is None:
+                raise InvalidInputError(f"no parent category with id {parent_id!r}")
             order = (
                 sort_order if sort_order is not None
                 else 1 + max((g.sort_order for g in uow.tag_groups.list_all()), default=-1)
             )
-            return uow.tag_groups.add(
-                TagGroup(name=clean, color=color, sort_order=order, has_page=has_page)
-            )
+            return uow.tag_groups.add(TagGroup(
+                name=clean, color=color, sort_order=order, has_page=has_page,
+                parent_id=parent_id, notes=notes,
+            ))
 
     def update(self, group_id: int, *, name: str, color: str, has_page: bool,
-               sort_order: int) -> TagGroup:
+               sort_order: int, parent_id: int | None = None) -> TagGroup:
         clean = name.strip()
         if not clean:
             raise InvalidInputError("a category needs a name")
         with self._db.transaction() as uow:
             group = _require(uow.tag_groups.get(group_id), "tag category", group_id)
+            if parent_id is not None:
+                self._guard_parent(uow, group_id, parent_id)
             group.name, group.color = clean, color
             group.has_page, group.sort_order = has_page, sort_order
+            group.parent_id = parent_id
             uow.tag_groups.update(group)
             return group
 
+    def set_notes(self, group_id: int, notes: str) -> TagGroup:
+        """Update only a category's page notes (its page's autosaving notes editor calls this)."""
+        with self._db.transaction() as uow:
+            group = _require(uow.tag_groups.get(group_id), "tag category", group_id)
+            group.notes = notes
+            uow.tag_groups.update(group)
+            return group
+
+    @staticmethod
+    def _guard_parent(uow: UnitOfWork, group_id: int, parent_id: int) -> None:
+        """Reject a parent that would create a cycle (self, or a descendant of this category)."""
+        if parent_id == group_id:
+            raise InvalidInputError("a category cannot be its own parent")
+        if uow.tag_groups.get(parent_id) is None:
+            raise InvalidInputError(f"no parent category with id {parent_id!r}")
+        by_id = {g.id: g for g in uow.tag_groups.list_all()}
+        cursor: int | None = parent_id
+        seen: set[int] = set()
+        while cursor is not None and cursor not in seen:
+            if cursor == group_id:
+                raise InvalidInputError("that parent would create a category cycle")
+            seen.add(cursor)
+            parent = by_id.get(cursor)
+            cursor = parent.parent_id if parent is not None else None
+
     def delete(self, group_id: int) -> None:
         """Delete a category. Its tags are NOT deleted -- they fall back to uncategorised
-        (ON DELETE SET NULL on tags.group_id)."""
+        (ON DELETE SET NULL on tags.group_id); child categories are promoted to top-level
+        (ON DELETE SET NULL on tag_groups.parent_id)."""
         with self._db.transaction() as uow:
             _require(uow.tag_groups.get(group_id), "tag category", group_id)
             uow.tag_groups.delete(group_id)

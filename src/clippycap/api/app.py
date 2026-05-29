@@ -61,6 +61,7 @@ def _tag_group_dict(group: TagGroup) -> dict[str, Any]:
     return {
         "id": group.id, "name": group.name, "color": group.color,
         "sort_order": group.sort_order, "has_page": group.has_page,
+        "parent_id": group.parent_id, "notes": group.notes,
     }
 
 
@@ -161,6 +162,11 @@ class TagGroupBody(BaseModel):
     color: str = ""                    # "" = no colour, or hex "#rrggbb"
     has_page: bool = False
     sort_order: int = 0
+    parent_id: int | None = None       # nest under another category; None => top-level
+
+
+class TagGroupNotesBody(BaseModel):
+    notes: str = ""
 
 
 class RenameFileBody(BaseModel):
@@ -567,16 +573,23 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
 
     @api.post("/api/tag-groups", status_code=201)
     def create_tag_group(app: AppDep, body: TagGroupBody) -> dict[str, Any]:
-        group = app.tag_groups.create(name=body.name, color=body.color, has_page=body.has_page)
+        group = app.tag_groups.create(
+            name=body.name, color=body.color, has_page=body.has_page, parent_id=body.parent_id,
+        )
         return _tag_group_dict(group)
 
     @api.put("/api/tag-groups/{group_id}")
     def update_tag_group(app: AppDep, group_id: int, body: TagGroupBody) -> dict[str, Any]:
         group = app.tag_groups.update(
             group_id, name=body.name, color=body.color, has_page=body.has_page,
-            sort_order=body.sort_order,
+            sort_order=body.sort_order, parent_id=body.parent_id,
         )
         return _tag_group_dict(group)
+
+    @api.put("/api/tag-groups/{group_id}/notes")
+    def set_tag_group_notes(app: AppDep, group_id: int, body: TagGroupNotesBody) -> dict[str, Any]:
+        """Update only a category's page notes -- the category page's autosaving editor calls this."""
+        return _tag_group_dict(app.tag_groups.set_notes(group_id, body.notes))
 
     @api.delete("/api/tag-groups/{group_id}", status_code=204)
     def delete_tag_group(app: AppDep, group_id: int) -> Response:

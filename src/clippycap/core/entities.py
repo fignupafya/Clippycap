@@ -46,14 +46,17 @@ class AssetPath:
 
 @dataclass(slots=True)
 class TagGroup:
-    """A user-defined, flat category that organises tags into a dimension (e.g. "players",
-    "maps"). Entirely user-created -- there are NO built-in groups. ``has_page`` opts the group
-    into its own hub view (a directory of its tags); off by default."""
+    """A user-defined category that organises tags into a dimension (e.g. "players", "maps").
+    Entirely user-created -- there are NO built-in groups. ``parent_id`` nests it under another
+    category (``None`` => top-level). ``has_page`` opts it into its own page (a directory of its
+    sub-categories + tags, plus the editable ``notes`` write-up); off / empty by default."""
 
     name: str                                # unique
     color: str = ""                          # hex "#rrggbb" or "" for none
     sort_order: int = 0
     has_page: bool = False
+    parent_id: int | None = None             # nest under another category; None => top-level
+    notes: str = ""                          # free-form markdown body shown on the category's page
     id: int | None = None
 
 

@@ -51,6 +51,8 @@
   let tagPage = $derived(tagPageId != null ? (tagById.get(tagPageId) ?? null) : null);
   let categoryPageId = $state<number | null>(null);  // open a category's hub page (directory of its tags)
   let categoryPage = $derived(categoryPageId != null ? (tagGroupById.get(categoryPageId) ?? null) : null);
+  let categoryPageNotes = $state('');                // editable notes body on the open category page
+  let categoryPageNotesTimer: ReturnType<typeof setTimeout> | null = null;
   let sources = $state<Source[]>([]);
 
   // Group a list of tags into category sections for the picker / sidebar. Categories come in their
@@ -160,6 +162,7 @@
   let newTagGroupId = $state<number | null>(null);   // category chosen in the tag create/edit form
   let newTagHasPage = $state(false);                 // "give this tag its own page" toggle
   let newGroupName = $state('');                     // "new category" input in the tag manager
+  let newGroupParentId = $state<number | null>(null);  // optional parent for a new category
   let uploadingImg = $state(false);
   // per-note tag dropdown (only one open at a time)
   let tagDropdownNoteId = $state<number | null>(null);
@@ -833,14 +836,14 @@
   async function createCategory() {
     const name = newGroupName.trim();
     if (!name) return;
-    try { await api.createTagGroup({ name }); newGroupName = ''; await loadTags(); } catch (e) { toast(String(e), 'error'); }
+    try { await api.createTagGroup({ name, parent_id: newGroupParentId }); newGroupName = ''; newGroupParentId = null; await loadTags(); } catch (e) { toast(String(e), 'error'); }
   }
   async function deleteCategory(g: TagGroup) {
     if (!await confirmDialog(`Delete category “${g.name}”?`, { detail: 'Its tags are kept — they just become uncategorised.', okLabel: 'Delete', danger: true })) return;
     try { await api.deleteTagGroup(g.id); await loadTags(); } catch (e) { toast(String(e), 'error'); }
   }
   async function toggleGroupPage(g: TagGroup, on: boolean) {
-    try { await api.updateTagGroup(g.id, { name: g.name, color: g.color, has_page: on, sort_order: g.sort_order }); await loadTags(); }
+    try { await api.updateTagGroup(g.id, { name: g.name, color: g.color, has_page: on, sort_order: g.sort_order, parent_id: g.parent_id }); await loadTags(); }
     catch (e) { toast(String(e), 'error'); }
   }
   // Tag page (dossier): the notes write-up + the clips carrying the tag (the grid, filtered to it).
@@ -858,11 +861,27 @@
       if (id != null) void api.setTagNotes(id, body).then(() => loadTags()).catch((e) => toast(String(e), 'error'));
     }, 600);
   }
-  // Category page (hub): a directory of the category's tags; click one to open its dossier.
+  // Category page (hub): editable notes + a directory of its sub-categories and tags.
   function openCategoryPage(g: TagGroup) {
-    closeDetail(); showTags = false; tagPageId = null; categoryPageId = g.id;
+    closeDetail(); showTags = false; tagPageId = null;
+    categoryPageId = g.id; categoryPageNotes = g.notes;
   }
   function closeCategoryPage() { categoryPageId = null; }
+  function onCategoryPageNotesInput() {
+    if (categoryPageNotesTimer) clearTimeout(categoryPageNotesTimer);
+    const id = categoryPageId;
+    const body = categoryPageNotes;
+    categoryPageNotesTimer = setTimeout(() => {
+      if (id != null) void api.setTagGroupNotes(id, body).then(() => loadTags()).catch((e) => toast(String(e), 'error'));
+    }, 600);
+  }
+  // Categories that have a page, as a parent->children tree for the sidebar navigator.
+  function rootPageCategories(): TagGroup[] {
+    return tagGroups.filter((g) => g.has_page && (g.parent_id == null || !tagGroups.some((p) => p.id === g.parent_id && p.has_page)));
+  }
+  function childPageCategories(parentId: number): TagGroup[] {
+    return tagGroups.filter((g) => g.has_page && g.parent_id === parentId);
+  }
   async function applyTag(tagId: number) {
     if (!detail) return;
     try { await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
@@ -1324,6 +1343,10 @@
           {/each}
         </div>
       {/if}
+      {#if rootPageCategories().length}
+        <div class="sec-title">Categories</div>
+        {#each rootPageCategories() as g (g.id)}{@render catNavNode(g, 0)}{/each}
+      {/if}
       <div class="sec-title">Tags</div>
       {#each groupTags(tags, '') as section (section.group?.id ?? 'uncat')}
         {#if section.group}
@@ -1366,18 +1389,34 @@
       {/if}
       {#if categoryPage}
         {@const cat = categoryPage}
-        <!-- Category hub: a directory of the category's tags; click one to open its dossier. -->
+        <!-- Category page (hub): editable notes + sub-categories + the category's tags. -->
         <div class="tagpage" style:--c={cat.color || 'var(--accent)'}>
           <div class="tagpage-head">
             <button class="btn sm" onclick={closeCategoryPage}>← Library</button>
-            <span class="tagpage-title">{cat.name}</span>
+            {#if cat.parent_id != null}
+              {@const parent = tagGroupById.get(cat.parent_id)}
+              {#if parent}<button class="btn sm" onclick={() => openCategoryPage(parent)} title="parent category">↑ {parent.name}</button>{/if}
+            {/if}
+            <span class="tagpage-title">📁 {cat.name}</span>
             <span class="faint" style:font-size="12px">{tags.filter((t) => t.group_id === cat.id).length} tags</span>
           </div>
+          <textarea class="field tagpage-notes" rows="3"
+                    placeholder="Notes about “{cat.name}” — what this category is, what to look for…"
+                    bind:value={categoryPageNotes} oninput={onCategoryPageNotesInput}></textarea>
+          {#if childPageCategories(cat.id).length}
+            <div class="tagpage-sub">Sub-categories</div>
+            <div class="tagcloud">
+              {#each childPageCategories(cat.id) as g (g.id)}
+                <button class="tagchip" style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)}>📁 {g.name} ↗</button>
+              {/each}
+            </div>
+          {/if}
+          <div class="tagpage-sub">Tags</div>
           <div class="tagcloud">
             {#each tags.filter((t) => t.group_id === cat.id) as t (t.id)}
               <button class="tagchip" style:--c={t.color} onclick={() => (t.has_page ? openTagPage(t) : (closeCategoryPage(), toggleTagFilter(t.id)))}>{@render tagFace(t)} {t.name} <span class="n">{t.asset_count ?? 0}</span></button>
             {/each}
-            {#if tags.filter((t) => t.group_id === cat.id).length === 0}<span class="faint" style:font-size="12px">No tags in this category yet.</span>{/if}
+            {#if tags.filter((t) => t.group_id === cat.id).length === 0}<span class="faint" style:font-size="12px">No tags in this category yet — assign one in the Tags manager.</span>{/if}
           </div>
         </div>
       {/if}
@@ -1701,6 +1740,7 @@
   {/if}
 {/snippet}
 {#snippet tagFace(t: Tag)}{#if t.image_ref}<img class="tagimg" src="/api/tag-images/{t.image_ref}" alt="" />{:else if t.icon}{t.icon}{/if}{/snippet}
+{#snippet catNavNode(g: TagGroup, depth: number)}<button class="catnav" class:on={categoryPageId === g.id} style:padding-left={6 + depth * 14 + 'px'} style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)}>📁 {g.name}</button>{#each childPageCategories(g.id) as c (c.id)}{@render catNavNode(c, depth + 1)}{/each}{/snippet}
 {#snippet noteBody(body: string)}{#each splitMentions(body) as seg}{#if seg.id != null}{@const nm = seg.noteId != null ? detail?.mentioned_notes?.[String(seg.noteId)] : undefined}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions --><span class="mention" role="link" tabindex="0" onclick={() => (seg.noteId != null ? navToNote(seg.id ?? 0, seg.noteId) : navTo(seg.id ?? 0))} onmouseenter={(e) => showMentionPopup(e, seg.id ?? 0, seg.text, nm?.body, nm?.timestamp_ms)} onmouseleave={hideMentionPopup}>@{seg.text}{#if nm}<span class="ts-badge" style:margin-left="4px">{fmt(nm.timestamp_ms)}</span>{/if}</span>{:else}{seg.text}{/if}{/each}{/snippet}
 {#snippet refCard(r: ReferenceView, outgoing: boolean)}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -1836,7 +1876,11 @@
             <div class="trow"><span class="sw" style:background={g.color || 'var(--text-3)'}></span> {#if g.has_page}<button class="namelink" onclick={() => openCategoryPage(g)} title="open this category's hub page">{g.name} ↗</button>{:else}<b>{g.name}</b>{/if} <span class="faint" style:font-size="11px">{tags.filter((t) => t.group_id === g.id).length} tags</span><span style:flex="1"></span><label class="chk" title="give this category its own hub page"><input type="checkbox" checked={g.has_page} onchange={(e) => toggleGroupPage(g, (e.currentTarget as HTMLInputElement).checked)} /> page</label><button class="x" onclick={() => deleteCategory(g)} title="delete category (its tags become uncategorised)">🗑</button></div>
           {/each}
           <div class="trow">
-            <input class="field" style:max-width="180px" placeholder="new category name" bind:value={newGroupName} onkeydown={(e) => { if (e.key === 'Enter') void createCategory(); }} />
+            <input class="field" style:max-width="160px" placeholder="new category name" bind:value={newGroupName} onkeydown={(e) => { if (e.key === 'Enter') void createCategory(); }} />
+            <select class="field" style:max-width="150px" bind:value={newGroupParentId} title="optional: nest under another category">
+              <option value={null}>— top level —</option>
+              {#each tagGroups as g (g.id)}<option value={g.id}>under: {g.name}</option>{/each}
+            </select>
             <button class="btn sm" onclick={createCategory}>+ Category</button>
           </div>
         </div>
@@ -2036,6 +2080,10 @@
   .tagpage-head { display: flex; align-items: center; gap: 10px; }
   .tagpage-title { font-size: 16px; font-weight: 700; display: inline-flex; align-items: center; gap: 6px; }
   .tagpage-notes { resize: vertical; font-size: 13px; }
+  .tagpage-sub { font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--text-3); margin-top: 2px; }
+  .catnav { --c: var(--text-3); display: block; width: 100%; text-align: left; background: transparent; border: none; border-left: 3px solid var(--c); padding: 3px 6px; font-size: 12px; color: var(--text-2); cursor: pointer; border-radius: 0 4px 4px 0; }
+  .catnav:hover { color: var(--text); background: var(--bg-2); }
+  .catnav.on { color: var(--accent); background: var(--bg-2); }
   .chk { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--text-3); cursor: pointer; }
   .chk input { accent-color: var(--accent); }
   .tagchip.on { color: #f7f9fb; border-color: transparent; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }

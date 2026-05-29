@@ -117,6 +117,8 @@ def _tag_group(r: sqlite3.Row) -> TagGroup:
         color=r["color"],
         sort_order=r["sort_order"],
         has_page=bool(r["has_page"]),
+        parent_id=r["parent_id"],
+        notes=r["notes"],
         id=r["id"],
     )
 
@@ -478,8 +480,10 @@ class SqliteTagGroupRepository(_Repo):
     def add(self, group: TagGroup) -> TagGroup:
         try:
             cur = self._c.execute(
-                "INSERT INTO tag_groups(name, color, sort_order, has_page) VALUES (?,?,?,?)",
-                (group.name, group.color, group.sort_order, int(group.has_page)),
+                "INSERT INTO tag_groups(name, color, sort_order, has_page, parent_id, notes) "
+                "VALUES (?,?,?,?,?,?)",
+                (group.name, group.color, group.sort_order, int(group.has_page),
+                 group.parent_id, group.notes),
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"a tag category named {group.name!r} already exists") from exc
@@ -503,8 +507,10 @@ class SqliteTagGroupRepository(_Repo):
     def update(self, group: TagGroup) -> None:
         try:
             self._c.execute(
-                "UPDATE tag_groups SET name=?, color=?, sort_order=?, has_page=? WHERE id=?",
-                (group.name, group.color, group.sort_order, int(group.has_page), group.id),
+                "UPDATE tag_groups SET name=?, color=?, sort_order=?, has_page=?, parent_id=?, "
+                "notes=? WHERE id=?",
+                (group.name, group.color, group.sort_order, int(group.has_page),
+                 group.parent_id, group.notes, group.id),
             )
         except sqlite3.IntegrityError as exc:
             raise ConflictError(f"a tag category named {group.name!r} already exists") from exc
