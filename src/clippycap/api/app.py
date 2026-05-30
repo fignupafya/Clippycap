@@ -242,6 +242,16 @@ class BulkTagsBody(BaseModel):
     replace_with: list[int] | None = None
 
 
+class BulkCategoriesBody(BaseModel):
+    """A bulk direct-category change -- semantics mirror BulkTagsBody. Tag-derived category
+    membership is independent and isn't touched here."""
+
+    ids: list[int] = Field(min_length=1)
+    add: list[int] = Field(default_factory=list)
+    remove: list[int] = Field(default_factory=list)
+    replace_with: list[int] | None = None
+
+
 class NoteTagsBody(BaseModel):
     tag_ids: list[int]
 
@@ -431,6 +441,21 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
         sets each asset's tags to exactly that set; otherwise ``add`` / ``remove`` are applied
         as a diff. Returns counts of links actually created / removed."""
         return app.tags.bulk_apply(
+            asset_ids=body.ids, add=body.add, remove=body.remove,
+            replace_with=body.replace_with,
+        )
+
+    @api.post("/api/assets/category-counts")
+    def asset_category_counts(app: AppDep, body: IdsBody) -> dict[int, int]:
+        """For each category id: how many of ``body.ids`` are DIRECTLY in that category. Powers
+        the bulk-edit modal's per-category 'N of M selected are here' indicator."""
+        return app.assets.bulk_category_counts(body.ids)
+
+    @api.post("/api/assets/bulk-categories")
+    def bulk_categories(app: AppDep, body: BulkCategoriesBody) -> dict[str, int]:
+        """Apply direct-category changes across many clips in one transaction (mirror of
+        ``/api/assets/bulk-tags``). Tag-derived category membership is independent and unaffected."""
+        return app.assets.bulk_apply_categories(
             asset_ids=body.ids, add=body.add, remove=body.remove,
             replace_with=body.replace_with,
         )

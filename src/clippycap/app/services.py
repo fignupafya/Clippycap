@@ -197,6 +197,51 @@ class AssetService:
             uow.assets.remove_category(asset_id, category_id)
         self._bus.publish(AssetUpdated(asset_id=asset_id))
 
+    def bulk_category_counts(self, asset_ids: Sequence[int]) -> dict[int, int]:
+        """For each category id, how many of ``asset_ids`` are DIRECTLY in that category. Powers the
+        bulk-edit modal's per-category 'N of M selected are here' indicator."""
+        counts: dict[int, int] = {}
+        with self._db.transaction() as uow:
+            for asset_id in asset_ids:
+                for cid in uow.assets.category_ids_for_asset(asset_id):
+                    counts[cid] = counts.get(cid, 0) + 1
+        return counts
+
+    def bulk_apply_categories(
+        self, *, asset_ids: Sequence[int],
+        add: Sequence[int] = (), remove: Sequence[int] = (),
+        replace_with: Sequence[int] | None = None,
+    ) -> dict[str, int]:
+        """Apply a bulk DIRECT-category change in one transaction. Semantics mirror ``TagService.
+        bulk_apply``: when ``replace_with`` is given each asset's direct-category set becomes
+        EXACTLY that; otherwise ``add`` / ``remove`` are applied as a diff. Tag-derived category
+        membership is untouched -- it follows the underlying tags."""
+        added = 0
+        removed = 0
+        with self._db.transaction() as uow:
+            for asset_id in asset_ids:
+                if uow.assets.get(asset_id) is None:
+                    continue
+                current = set(uow.assets.category_ids_for_asset(asset_id))
+                if replace_with is not None:
+                    target = set(replace_with)
+                    for cid in current - target:
+                        if uow.assets.remove_category(asset_id, cid):
+                            removed += 1
+                    for cid in target - current:
+                        if uow.assets.add_category(asset_id, cid):
+                            added += 1
+                else:
+                    for cid in add:
+                        if cid not in current and uow.assets.add_category(asset_id, cid):
+                            added += 1
+                            current.add(cid)
+                    for cid in remove:
+                        if cid in current and uow.assets.remove_category(asset_id, cid):
+                            removed += 1
+                            current.discard(cid)
+        return {"added": added, "removed": removed}
+
     def get(self, asset_id: int) -> Asset | None:
         with self._db.transaction() as uow:
             return uow.assets.get(asset_id)

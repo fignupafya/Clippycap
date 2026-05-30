@@ -107,17 +107,30 @@
   let selected = $state<Set<number>>(new Set());     // selected asset ids (grid multi-select)
   let lastSelectedId = $state<number | null>(null);  // anchor for shift-range select
   let bulkBusy = $state(false);
-  // bulk-tag modal state (Add/Remove (diff) and Replace (override) modes)
+  // bulk-edit modal state. Two tabs (Tags / Categories) share the same Add/Remove vs Replace mode
+  // and Apply button -- the two dimensions accumulate state independently, and a single Apply call
+  // sends both diffs if the user touched either tab.
   let showBulkTagModal = $state(false);
-  let bulkTagMode = $state<'modify' | 'replace'>('modify');
+  let bulkKind = $state<'tags' | 'cats'>('tags');             // which tab the user is currently editing
+  let bulkTagMode = $state<'modify' | 'replace'>('modify');   // mode applies to both kinds
   let bulkTagSearch = $state('');
-  let bulkTagAdd = $state<Set<number>>(new Set());           // tag ids queued to add (modify mode)
-  let bulkTagRemove = $state<Set<number>>(new Set());        // tag ids queued to remove (modify mode)
-  let bulkTagReplaceSet = $state<Set<number>>(new Set());    // checked tags for Replace mode
+  let bulkTagAdd = $state<Set<number>>(new Set());            // tag ids queued to add (modify mode)
+  let bulkTagRemove = $state<Set<number>>(new Set());         // tag ids queued to remove (modify mode)
+  let bulkTagReplaceSet = $state<Set<number>>(new Set());     // checked tags for Replace mode
   let bulkTagCounts = $state<Map<number, number>>(new Map()); // tag id -> # of selected that have it
-  let bulkTagModalSize = $state(0);                          // selected.size when the modal opened
+  let bulkCatAdd = $state<Set<number>>(new Set());
+  let bulkCatRemove = $state<Set<number>>(new Set());
+  let bulkCatReplaceSet = $state<Set<number>>(new Set());
+  let bulkCatCounts = $state<Map<number, number>>(new Map());
+  // "Interacted" flags so an untouched tab is never written through. Critical for Replace mode:
+  // without this, Apply with mode=Replace would wipe a dimension the user never visited (because
+  // every Replace call is destructive even with the pre-filled "all clips share" set).
+  let bulkTagsInteracted = $state(false);
+  let bulkCatsInteracted = $state(false);
+  let bulkTagModalSize = $state(0);                           // selected.size when the modal opened
   let filteredBulkTags = $derived(tags.filter((t) => t.name.toLowerCase().includes(bulkTagSearch.toLowerCase())));
-  let canApplyBulkTag = $derived(bulkTagMode === 'replace' || bulkTagAdd.size > 0 || bulkTagRemove.size > 0);
+  let filteredBulkCats = $derived(tagGroups.filter((g) => g.name.toLowerCase().includes(bulkTagSearch.toLowerCase())));
+  let canApplyBulkTag = $derived(bulkTagsInteracted || bulkCatsInteracted);
 
   let detail = $state<AssetDetail | null>(null);
   let refs = $state<{ outgoing: ReferenceView[]; incoming: ReferenceView[] }>({ outgoing: [], incoming: [] });
@@ -593,27 +606,33 @@
   async function openBulkTagModal() {
     if (selected.size === 0) return;
     const ids = [...selected];
-    bulkTagAdd = new Set();
-    bulkTagRemove = new Set();
-    bulkTagReplaceSet = new Set();
+    bulkTagAdd = new Set(); bulkTagRemove = new Set(); bulkTagReplaceSet = new Set();
+    bulkCatAdd = new Set(); bulkCatRemove = new Set(); bulkCatReplaceSet = new Set();
+    bulkTagsInteracted = false; bulkCatsInteracted = false;
     bulkTagSearch = '';
     bulkTagMode = 'modify';
+    bulkKind = 'tags';
     bulkTagModalSize = ids.length;
     try {
-      const raw = await api.assetTagCounts(ids);
-      const counts = new Map<number, number>();
-      for (const [k, v] of Object.entries(raw)) counts.set(Number(k), v);
-      bulkTagCounts = counts;
-      // Pre-fill the Replace-mode checkbox set with tags that ALL selected clips already have
-      // -- so opening the modal and hitting Apply with no changes is a no-op (no surprise wipe).
-      bulkTagReplaceSet = new Set(
-        [...counts.entries()].filter(([, c]) => c === ids.length).map(([id]) => id),
-      );
+      const [tagRaw, catRaw] = await Promise.all([api.assetTagCounts(ids), api.assetCategoryCounts(ids)]);
+      const tagCounts = new Map<number, number>();
+      for (const [k, v] of Object.entries(tagRaw)) tagCounts.set(Number(k), v);
+      bulkTagCounts = tagCounts;
+      const catCounts = new Map<number, number>();
+      for (const [k, v] of Object.entries(catRaw)) catCounts.set(Number(k), v);
+      bulkCatCounts = catCounts;
+      // Pre-fill the Replace-mode checkbox sets with tags / categories that ALL selected clips
+      // already have -- so opening the modal and hitting Apply with no changes is a no-op.
+      bulkTagReplaceSet = new Set([...tagCounts.entries()].filter(([, c]) => c === ids.length).map(([id]) => id));
+      bulkCatReplaceSet = new Set([...catCounts.entries()].filter(([, c]) => c === ids.length).map(([id]) => id));
     } catch (e) { toast(String(e), 'error'); return; }
     showBulkTagModal = true;
   }
   function closeBulkTagModal() { showBulkTagModal = false; }
+  function _markTagsInteracted() { bulkTagsInteracted = true; }
+  function _markCatsInteracted() { bulkCatsInteracted = true; }
   function toggleBulkTagAdd(id: number) {
+    _markTagsInteracted();
     const next = new Set(bulkTagAdd);
     if (next.has(id)) { next.delete(id); }
     else {
@@ -623,6 +642,7 @@
     bulkTagAdd = next;
   }
   function toggleBulkTagRemove(id: number) {
+    _markTagsInteracted();
     const next = new Set(bulkTagRemove);
     if (next.has(id)) { next.delete(id); }
     else {
@@ -632,27 +652,65 @@
     bulkTagRemove = next;
   }
   function toggleBulkTagReplace(id: number, checked: boolean) {
+    _markTagsInteracted();
     const next = new Set(bulkTagReplaceSet);
     if (checked) next.add(id); else next.delete(id);
     bulkTagReplaceSet = next;
   }
+  function toggleBulkCatAdd(id: number) {
+    _markCatsInteracted();
+    const next = new Set(bulkCatAdd);
+    if (next.has(id)) next.delete(id);
+    else { next.add(id); if (bulkCatRemove.has(id)) { const rm = new Set(bulkCatRemove); rm.delete(id); bulkCatRemove = rm; } }
+    bulkCatAdd = next;
+  }
+  function toggleBulkCatRemove(id: number) {
+    _markCatsInteracted();
+    const next = new Set(bulkCatRemove);
+    if (next.has(id)) next.delete(id);
+    else { next.add(id); if (bulkCatAdd.has(id)) { const ad = new Set(bulkCatAdd); ad.delete(id); bulkCatAdd = ad; } }
+    bulkCatRemove = next;
+  }
+  function toggleBulkCatReplace(id: number, checked: boolean) {
+    _markCatsInteracted();
+    const next = new Set(bulkCatReplaceSet);
+    if (checked) next.add(id); else next.delete(id);
+    bulkCatReplaceSet = next;
+  }
   async function applyBulkTag() {
     const ids = [...selected];
     if (ids.length === 0 || bulkBusy) return;
+    // Only apply to a dimension the user actually interacted with. In Replace mode this matters
+    // most: a Replace call is destructive, so an untouched Categories tab must NOT be wiped just
+    // because the user chose Replace mode for Tags. The `bulk*Interacted` flag flips on any +/-
+    // or checkbox click in that tab, and resets on modal open.
+    const tagsTouched = bulkTagsInteracted;
+    const catsTouched = bulkCatsInteracted;
+    if (!tagsTouched && !catsTouched) return;
     bulkBusy = true;
-    const tid = toastSticky(`Applying tag changes to ${ids.length} clip${ids.length === 1 ? '' : 's'}…`);
+    const tid = toastSticky(`Applying changes to ${ids.length} clip${ids.length === 1 ? '' : 's'}…`);
     try {
-      const ops = bulkTagMode === 'replace'
+      const tagOps = bulkTagMode === 'replace'
         ? { replace_with: [...bulkTagReplaceSet] }
         : { add: [...bulkTagAdd], remove: [...bulkTagRemove] };
-      const result = await api.bulkTags(ids, ops);
+      const catOps = bulkTagMode === 'replace'
+        ? { replace_with: [...bulkCatReplaceSet] }
+        : { add: [...bulkCatAdd], remove: [...bulkCatRemove] };
+      const [tagResult, catResult] = await Promise.all([
+        tagsTouched ? api.bulkTags(ids, tagOps) : Promise.resolve({ added: 0, removed: 0 }),
+        catsTouched ? api.bulkCategories(ids, catOps) : Promise.resolve({ added: 0, removed: 0 }),
+      ]);
       closeBulkTagModal();
       await loadAssets(); await loadTags(); await refreshDetail();
-      const total = result.added + result.removed;
-      if (total === 0) toastUpdate(tid, 'No tag changes were needed', 'info');
-      else toastUpdate(tid, `Tags updated: +${result.added} added · −${result.removed} removed`, 'success');
+      const parts: string[] = [];
+      const tagTotal = tagResult.added + tagResult.removed;
+      const catTotal = catResult.added + catResult.removed;
+      if (tagTotal > 0) parts.push(`tags +${tagResult.added}/−${tagResult.removed}`);
+      if (catTotal > 0) parts.push(`categories +${catResult.added}/−${catResult.removed}`);
+      if (parts.length === 0) toastUpdate(tid, 'No changes were needed', 'info');
+      else toastUpdate(tid, `Updated: ${parts.join(' · ')}`, 'success');
     } catch (e) {
-      toastUpdate(tid, `Tag update failed: ${e}`, 'error');
+      toastUpdate(tid, `Bulk update failed: ${e}`, 'error');
     } finally { bulkBusy = false; }
   }
   async function bulkDelete() {
@@ -1561,7 +1619,7 @@
           {#if total > assets.length && selected.size < total}<button class="btn sm" onclick={selectAllMatching}>all {total} matching</button>{/if}
           <button class="btn sm" onclick={clearSelection}>clear</button>
           <span style:flex="1"></span>
-          <button class="btn sm" disabled={bulkBusy || tags.length === 0} onclick={openBulkTagModal} title={tags.length === 0 ? 'create tags first via the Tags modal' : 'open the bulk-tag editor (Add/Remove or Replace)'}>🏷 Edit tags…</button>
+          <button class="btn sm" disabled={bulkBusy || (tags.length === 0 && tagGroups.length === 0)} onclick={openBulkTagModal} title={tags.length === 0 && tagGroups.length === 0 ? 'create tags or categories first via the Tags modal' : 'open the bulk editor (tags + categories, Add/Remove or Replace)'}>🏷📁 Edit tags & categories…</button>
           <button class="btn sm" disabled={bulkBusy} onclick={bulkDelete}>🗑 delete {selected.size}</button>
         </div>
       {/if}
@@ -1581,7 +1639,11 @@
               <img src={a.thumbnail_url} alt="" onerror={hideBrokenImg} />
               <span class="film">▶</span>
               <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-              <span class="selbox" class:on={selected.has(a.id)} onclick={(e) => { e.stopPropagation(); toggleSelect(a); }} title="select (Ctrl-click / Shift-click range)">{selected.has(a.id) ? '✓' : ''}</span>
+              <!-- The visible square stays small (.selbox-mark, 18 px) but the *hit area* (.selbox)
+                   extends to 32 px so it's a comfortable click target. The padding is invisible. -->
+              <span class="selbox" class:on={selected.has(a.id)} onclick={(e) => { e.stopPropagation(); toggleSelect(a); }} title="select (Ctrl-click / Shift-click range)">
+                <span class="selbox-mark">{selected.has(a.id) ? '✓' : ''}</span>
+              </span>
               {#if durationOf(a.metadata)}<span class="dur">{durationOf(a.metadata)}</span>
               {:else if a.metadata_pending}<span class="dur pending" title="reading clip details…">…</span>{/if}
               {#if a.is_new}<span class="badge bnew">new</span>{/if}
@@ -2141,7 +2203,14 @@
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) closeBulkTagModal(); }}>
     <div class="modal bulk-tag-modal">
-      <div class="mtop"><h3>Tag {bulkTagModalSize} clip{bulkTagModalSize === 1 ? '' : 's'}</h3><span style:flex="1"></span><button class="btn sm" onclick={closeBulkTagModal}>Close</button></div>
+      <div class="mtop"><h3>Edit {bulkTagModalSize} clip{bulkTagModalSize === 1 ? '' : 's'}</h3><span style:flex="1"></span><button class="btn sm" onclick={closeBulkTagModal}>Close</button></div>
+      <!-- Kind tab: switches between editing the clips' tags vs their direct categories. The mode
+           tab (Add/Remove vs Replace) and the queued changes for each kind are independent and
+           preserved across switches, so the user can stage changes on both before applying. -->
+      <div class="settings-tabs">
+        <button class:on={bulkKind === 'tags'} onclick={() => (bulkKind = 'tags')}>🏷 Tags{#if bulkTagAdd.size + bulkTagRemove.size > 0} <span class="bulkkind-dot"></span>{/if}</button>
+        <button class:on={bulkKind === 'cats'} onclick={() => (bulkKind = 'cats')}>📁 Categories{#if bulkCatAdd.size + bulkCatRemove.size > 0} <span class="bulkkind-dot"></span>{/if}</button>
+      </div>
       <div class="settings-tabs">
         <button class:on={bulkTagMode === 'modify'} onclick={() => (bulkTagMode = 'modify')}>Add / Remove (diff)</button>
         <button class:on={bulkTagMode === 'replace'} onclick={() => (bulkTagMode = 'replace')}>Replace (override)</button>
@@ -2149,52 +2218,86 @@
       <div class="mbody">
         {#if bulkTagMode === 'modify'}
           <p class="faint" style:font-size="12px" style:margin-bottom="8px">
-            Per-tag <kbd>+</kbd> / <kbd>−</kbd> queue additions and removals. Tags you leave alone stay exactly as they are on each clip.
+            Per-{bulkKind === 'tags' ? 'tag' : 'category'} <kbd>+</kbd> / <kbd>−</kbd> queue additions and removals. {bulkKind === 'tags' ? 'Tags' : 'Categories'} you leave alone stay exactly as they are on each clip.
           </p>
         {:else}
           <p class="faint" style:font-size="12px" style:margin-bottom="8px">
-            The checked tags become the EXACT tag set on each selected clip. Any other tags currently on those clips are removed.
+            The checked {bulkKind === 'tags' ? 'tags' : 'categories'} become the EXACT {bulkKind === 'tags' ? 'tag' : 'direct-category'} set on each selected clip. Any other {bulkKind === 'tags' ? 'tags' : 'direct-category memberships'} currently on those clips are removed.{#if bulkKind === 'cats'} (Tag-derived category membership is independent.){/if}
           </p>
         {/if}
-        <input class="field" placeholder="search tags…" bind:value={bulkTagSearch} style:width="100%" style:margin-bottom="10px" />
+        <input class="field" placeholder={'search ' + (bulkKind === 'tags' ? 'tags…' : 'categories…')} bind:value={bulkTagSearch} style:width="100%" style:margin-bottom="10px" />
         <div class="bulk-tag-list">
-          {#if filteredBulkTags.length === 0}
-            <p class="faint" style:font-size="12px" style:padding="12px 0" style:text-align="center">{tags.length === 0 ? 'No tags yet — create some in the Tags modal first.' : 'No tags match your search.'}</p>
-          {/if}
-          {#each filteredBulkTags as t (t.id)}
-            {@const have = bulkTagCounts.get(t.id) ?? 0}
-            {#if bulkTagMode === 'modify'}
-              {@const queuedAdd = bulkTagAdd.has(t.id)}
-              {@const queuedRemove = bulkTagRemove.has(t.id)}
-              {@const missing = bulkTagModalSize - have}
-              <div class="bulk-tag-row" class:queued-add={queuedAdd} class:queued-remove={queuedRemove}>
-                <span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name}</span>
-                <span class="bulk-tag-counts" title="clips currently with this tag, out of selected">{have}/{bulkTagModalSize}</span>
-                <span class="bulk-tag-preview">
-                  {#if queuedAdd}<span class="bulk-tag-preview-add">+{missing}</span>
-                  {:else if queuedRemove}<span class="bulk-tag-preview-remove">−{have}</span>{/if}
-                </span>
-                <button class="bulk-tag-plus" class:on={queuedAdd} disabled={missing === 0} onclick={() => toggleBulkTagAdd(t.id)} title={missing === 0 ? 'all selected clips already have this tag' : `queue + add to ${missing} clip${missing === 1 ? '' : 's'} that don\'t have it`}>+</button>
-                <button class="bulk-tag-minus" class:on={queuedRemove} disabled={have === 0} onclick={() => toggleBulkTagRemove(t.id)} title={have === 0 ? 'no selected clip has this tag' : `queue − remove from ${have} clip${have === 1 ? '' : 's'} that have it`}>−</button>
-              </div>
-            {:else}
-              {@const checked = bulkTagReplaceSet.has(t.id)}
-              {@const indeterminate = !checked && have > 0 && have < bulkTagModalSize}
-              <label class="bulk-tag-replace-row">
-                <input type="checkbox" {checked} indeterminate={indeterminate} onchange={(e) => toggleBulkTagReplace(t.id, (e.currentTarget as HTMLInputElement).checked)} />
-                <span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name}</span>
-                <span class="bulk-tag-counts" title="clips currently with this tag, out of selected">{have}/{bulkTagModalSize}</span>
-              </label>
+          {#if bulkKind === 'tags'}
+            {#if filteredBulkTags.length === 0}
+              <p class="faint" style:font-size="12px" style:padding="12px 0" style:text-align="center">{tags.length === 0 ? 'No tags yet — create some in the Tags modal first.' : 'No tags match your search.'}</p>
             {/if}
-          {/each}
+            {#each filteredBulkTags as t (t.id)}
+              {@const have = bulkTagCounts.get(t.id) ?? 0}
+              {#if bulkTagMode === 'modify'}
+                {@const queuedAdd = bulkTagAdd.has(t.id)}
+                {@const queuedRemove = bulkTagRemove.has(t.id)}
+                {@const missing = bulkTagModalSize - have}
+                <div class="bulk-tag-row" class:queued-add={queuedAdd} class:queued-remove={queuedRemove}>
+                  <span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name}</span>
+                  <span class="bulk-tag-counts" title="clips currently with this tag, out of selected">{have}/{bulkTagModalSize}</span>
+                  <span class="bulk-tag-preview">
+                    {#if queuedAdd}<span class="bulk-tag-preview-add">+{missing}</span>
+                    {:else if queuedRemove}<span class="bulk-tag-preview-remove">−{have}</span>{/if}
+                  </span>
+                  <button class="bulk-tag-plus" class:on={queuedAdd} disabled={missing === 0} onclick={() => toggleBulkTagAdd(t.id)} title={missing === 0 ? 'all selected clips already have this tag' : `queue + add to ${missing} clip${missing === 1 ? '' : 's'} that don\'t have it`}>+</button>
+                  <button class="bulk-tag-minus" class:on={queuedRemove} disabled={have === 0} onclick={() => toggleBulkTagRemove(t.id)} title={have === 0 ? 'no selected clip has this tag' : `queue − remove from ${have} clip${have === 1 ? '' : 's'} that have it`}>−</button>
+                </div>
+              {:else}
+                {@const checked = bulkTagReplaceSet.has(t.id)}
+                {@const indeterminate = !checked && have > 0 && have < bulkTagModalSize}
+                <label class="bulk-tag-replace-row">
+                  <input type="checkbox" {checked} indeterminate={indeterminate} onchange={(e) => toggleBulkTagReplace(t.id, (e.currentTarget as HTMLInputElement).checked)} />
+                  <span class="pill" style:background={t.color}>{@render tagFace(t)} {t.name}</span>
+                  <span class="bulk-tag-counts" title="clips currently with this tag, out of selected">{have}/{bulkTagModalSize}</span>
+                </label>
+              {/if}
+            {/each}
+          {:else}
+            {#if filteredBulkCats.length === 0}
+              <p class="faint" style:font-size="12px" style:padding="12px 0" style:text-align="center">{tagGroups.length === 0 ? 'No categories yet — create some in the Tags modal first.' : 'No categories match your search.'}</p>
+            {/if}
+            {#each filteredBulkCats as g (g.id)}
+              {@const have = bulkCatCounts.get(g.id) ?? 0}
+              {#if bulkTagMode === 'modify'}
+                {@const queuedAdd = bulkCatAdd.has(g.id)}
+                {@const queuedRemove = bulkCatRemove.has(g.id)}
+                {@const missing = bulkTagModalSize - have}
+                <div class="bulk-tag-row" class:queued-add={queuedAdd} class:queued-remove={queuedRemove}>
+                  <span class="pill" style:background={g.color || 'var(--bg-3)'}>📁 {g.name}</span>
+                  <span class="bulk-tag-counts" title="clips DIRECTLY in this category, out of selected">{have}/{bulkTagModalSize}</span>
+                  <span class="bulk-tag-preview">
+                    {#if queuedAdd}<span class="bulk-tag-preview-add">+{missing}</span>
+                    {:else if queuedRemove}<span class="bulk-tag-preview-remove">−{have}</span>{/if}
+                  </span>
+                  <button class="bulk-tag-plus" class:on={queuedAdd} disabled={missing === 0} onclick={() => toggleBulkCatAdd(g.id)} title={missing === 0 ? 'all selected clips are already directly in this category' : `queue + assign to ${missing} clip${missing === 1 ? '' : 's'} not yet in it`}>+</button>
+                  <button class="bulk-tag-minus" class:on={queuedRemove} disabled={have === 0} onclick={() => toggleBulkCatRemove(g.id)} title={have === 0 ? 'no selected clip is directly in this category' : `queue − unassign from ${have} clip${have === 1 ? '' : 's'} that are`}>−</button>
+                </div>
+              {:else}
+                {@const checked = bulkCatReplaceSet.has(g.id)}
+                {@const indeterminate = !checked && have > 0 && have < bulkTagModalSize}
+                <label class="bulk-tag-replace-row">
+                  <input type="checkbox" {checked} indeterminate={indeterminate} onchange={(e) => toggleBulkCatReplace(g.id, (e.currentTarget as HTMLInputElement).checked)} />
+                  <span class="pill" style:background={g.color || 'var(--bg-3)'}>📁 {g.name}</span>
+                  <span class="bulk-tag-counts" title="clips DIRECTLY in this category, out of selected">{have}/{bulkTagModalSize}</span>
+                </label>
+              {/if}
+            {/each}
+          {/if}
         </div>
       </div>
       <div class="mfoot">
+        <!-- Footer summary reflects BOTH dimensions even on whichever tab is active, so the user
+             sees exactly what Apply will do without having to flip back and forth. -->
         <span class="faint" style:font-size="11.5px">
           {#if bulkTagMode === 'modify'}
-            {bulkTagAdd.size} to add · {bulkTagRemove.size} to remove
+            tags: +{bulkTagAdd.size} / −{bulkTagRemove.size} · categories: +{bulkCatAdd.size} / −{bulkCatRemove.size}
           {:else}
-            target set: {bulkTagReplaceSet.size} tag{bulkTagReplaceSet.size === 1 ? '' : 's'}
+            replace tags with {bulkTagReplaceSet.size} · replace direct categories with {bulkCatReplaceSet.size}
           {/if}
         </span>
         <span style:flex="1"></span>
@@ -2390,7 +2493,10 @@
   .thumb .dur { position: absolute; right: 6px; bottom: 6px; background: rgba(0,0,0,.72); padding: 1px 5px; border-radius: 4px; font-size: 11px; font-family: ui-monospace, monospace; }
   .thumb .dur.pending { color: var(--text-3); letter-spacing: 2px; }   /* "…" placeholder until enrichment fills the duration */
   .thumb .badge { position: absolute; left: 6px; bottom: 6px; background: rgba(0,0,0,.66); padding: 1px 6px; border-radius: 5px; font-size: 10.5px; font-weight: 700; }
-  .thumb .badge.bnew { top: 6px; bottom: auto; background: var(--amber); color: #0e1116; }
+  /* "new" badge sits in the top-RIGHT so it never overlaps the selection hit area in the top-left.
+     Previously both occupied left: 6px; top: 6px and the badge swallowed every click on a "new"
+     clip, opening the detail (which un-newed the clip) instead of toggling the checkbox. */
+  .thumb .badge.bnew { top: 6px; bottom: auto; left: auto; right: 6px; background: var(--amber); color: #0e1116; }
   .cb { padding: 8px 9px; }
   .cb .ct { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .cb .cdate { font-size: 11px; color: var(--text-3); margin-top: 1px; }
@@ -2473,9 +2579,15 @@
   .tag-dd-item:hover { background: var(--bg-2); }
   .tag-dd-item .sw { width: 10px; height: 10px; border-radius: 3px; border: 1px solid rgba(255,255,255,.13); flex: none; }
   .card.sel { outline: 2.5px solid var(--accent); outline-offset: -2px; }
-  .selbox { position: absolute; left: 6px; top: 6px; width: 18px; height: 18px; border-radius: 4px; border: 2px solid rgba(255,255,255,.55); background: rgba(0,0,0,.45); display: grid; place-items: center; font-size: 12px; font-weight: 900; color: #fff; opacity: 0; pointer-events: none; transition: opacity .1s; }
+  /* Selection hit-target: 32x32 outer (invisible padding for an easy click), 18x18 visible mark. */
+  .selbox { position: absolute; left: 0; top: 0; width: 32px; height: 32px; padding: 7px; box-sizing: border-box; display: grid; place-items: center; cursor: pointer; opacity: 0; pointer-events: none; transition: opacity .1s; background: transparent; border: none; }
+  .selbox-mark { display: grid; place-items: center; width: 18px; height: 18px; border-radius: 4px; border: 2px solid rgba(255,255,255,.55); background: rgba(0,0,0,.45); color: #fff; font-size: 12px; font-weight: 900; transition: background .1s, border-color .1s; }
   .thumb:hover .selbox, .selbox.on { opacity: 1; pointer-events: auto; }
-  .selbox.on { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  .selbox:hover .selbox-mark { border-color: #fff; }
+  .selbox.on .selbox-mark { background: var(--accent); border-color: var(--accent); color: #ffffff; }
+  /* Pending-changes dot on the bulk-modal kind tab (Tags / Categories), so the user sees at a
+     glance that the inactive tab also has queued changes that Apply will commit. */
+  .bulkkind-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); vertical-align: middle; margin-left: 4px; }
   .bulkbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 7px 11px; margin-bottom: 10px; background: var(--accent-soft); border: 1px solid var(--accent); border-radius: 8px; font-size: 13px; }
   .x { color: var(--text-3); }
   .x:hover { color: #ef5b5b; }

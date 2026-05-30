@@ -213,6 +213,10 @@ export const api = {
   // tag set with EXACTLY that. Otherwise add/remove are applied as a diff over existing tags.
   bulkTags: (ids: number[], ops: { add?: number[]; remove?: number[]; replace_with?: number[] | null }) =>
     req<{ added: number; removed: number }>('POST', '/api/assets/bulk-tags', { ids, ...ops }),
+  // Same Add/Remove vs Replace semantics for DIRECT clip-category membership.
+  assetCategoryCounts: (ids: number[]) => req<Record<string, number>>('POST', '/api/assets/category-counts', { ids }),
+  bulkCategories: (ids: number[], ops: { add?: number[]; remove?: number[]; replace_with?: number[] | null }) =>
+    req<{ added: number; removed: number }>('POST', '/api/assets/bulk-categories', { ids, ...ops }),
   // GitHub-release based update check + one-click install. The status carries every release between
   // the running version and the latest (newest-first); the install endpoint hands off to Inno's
   // CloseApplications flow (installed) or the rename-trick portable swap (portable).
