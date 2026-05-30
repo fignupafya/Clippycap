@@ -20,10 +20,14 @@ User data — the SQLite library, thumbnails, tag images, logs, `local.toml` —
 ## What it does
 
 - **Add a folder, scan, and your clips appear.** No managed library: Clippycap walks the folders you point it at, hashes each file, and stores everything keyed by content. Move, rename, or reorganise files however you want — Clippycap finds them again by hash and keeps every tag, note, and cross-reference intact. A missing file is marked *missing*, never deleted, and is restored the moment it reappears.
-- **Flat, user-defined tags.** A tag is a name, a colour, and either an emoji icon or an uploaded image. No nested hierarchies, no presets. Filter the library by any combination.
+- **User-defined tags.** A tag is a name, a colour, and either an emoji icon or an uploaded image. The picker is search-first with create-on-the-fly, and every tag — selected or not — wears its colour, so a long list stays scannable. Filter the library by any combination.
+- **Optional tag categories** for when the flat list gets crowded. Group player nicks under a "Players" category, maps under "Maps", etc. — entirely user-created, nothing hardcoded; categories can nest (Players → Scout_main). The library only surfaces the category UI once you create one, so people who don't want it never see it.
+- **Pages for tags and categories.** Any tag or category can opt into its own page: an autosaving notes write-up (markdown + `@clip` mentions) on top of the grid filtered to its content. Use a player tag's page as a dossier — your evaluation, every clip they show up in, all in one screen. A category page additionally lists its sub-categories and tags so it works as a hub.
+- **A clip can belong to a category without carrying any tag.** Assign clips to a category directly from the clip detail (📁+); the library's category filter then matches both directly-assigned clips and tag-derived ones, rolled up through the nesting.
+- **Multi-dimension filtering, combinable.** Tag filter + category filter + folder + search all combine as AND; multiple categories combine as OR within their dimension. Saved views remember the *whole* filter state so reopening one rebuilds exactly what you saved.
 - **General notes plus notes pinned to a moment in the video.** Each clip carries a free-form write-up *and* a timeline of timestamped notes. The detail view shows them as markers on the playhead bar; clicking a note seeks the player, dragging it retimes the note.
 - **Cross-reference clips.** Type `@another-clip` in any note and Clippycap links them automatically. You can also reference a specific *moment* of another clip — useful for "the kill that set up the play I'm reviewing here." The detail view shows incoming and outgoing references in dedicated panels.
-- **Fast full-text search.** SQLite + FTS5 over titles, notes, and tag names. Saved views remember filter combinations you re-open often.
+- **Fast full-text search.** SQLite + FTS5 over titles, notes, and tag names.
 - **A built-in rich player.** Frame-step, variable speed, IN/OUT trim handles on the timeline, draggable note markers. Optional FFmpeg-backed edit operations (trim, export, …) when FFmpeg is available.
 - **A real desktop window, not a browser tab.** Frameless WebView2 window with the app's own HTML title bar (logo, global search, drag region, custom min / max / close). Falls back to a chromeless Chrome/Edge `--app` window, then a normal browser tab, if WebView2 is absent.
 
@@ -81,7 +85,7 @@ Quality gates:
 .venv\Scripts\python -m mypy src/clippycap
 ```
 
-95 pytest tests pass (1 skipped); ruff + mypy `--strict` clean.
+98 pytest tests pass (1 skipped); ruff + mypy `--strict` clean.
 
 ## License
 
