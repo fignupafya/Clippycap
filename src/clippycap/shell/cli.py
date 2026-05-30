@@ -101,28 +101,48 @@ def _wait_until_started(server: uvicorn.Server, *, timeout: float = _SERVER_STAR
         time.sleep(0.03)
 
 
-def _acquire_single_instance_lock(data_dir: Path) -> Any:
-    """Take an exclusive lock on ``<data_dir>/.lock``. Returns the open file (the caller must keep it
-    alive for the process's lifetime) on success, or ``None`` if another instance already holds it.
-    The OS releases the lock when the process exits, so a crash never leaves it stuck."""
+def _acquire_single_instance_lock(data_dir: Path, *, retry_for_s: float = 2.5) -> Any:
+    """Take an exclusive lock on ``<data_dir>/.lock``. Returns the open file (the caller must keep
+    it alive for the process's lifetime) on success, or ``None`` if another instance still holds
+    it after a brief retry window. The OS releases the lock when the process exits, so a crash
+    never leaves it stuck.
+
+    The ``retry_for_s`` window matters for portable self-updates: the just-renamed-and-spawned
+    new exe starts BEFORE the old one's exit timer fires, so for ~1.5 s both instances overlap
+    in time and the new one's first lock attempt fails. Retrying for a couple of seconds lets
+    the new instance quietly outwait the old one instead of bailing with "already running" --
+    the genuine "another copy is already up" case still ends in ``None``, just 2-3 s later."""
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
         handle = (data_dir / ".lock").open("a+b")
     except OSError:
         return object()   # can't even create the lock file -> don't block startup over it
-    try:
-        if sys.platform == "win32":
-            import msvcrt  # noqa: PLC0415
+    if sys.platform == "win32":
+        import msvcrt  # noqa: PLC0415
 
-            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-        else:
-            import fcntl  # noqa: PLC0415
+        def _try_lock() -> bool:
+            try:
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError:
+                return False
+            return True
+    else:
+        import fcntl  # noqa: PLC0415
 
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        handle.close()
-        return None
-    return handle
+        def _try_lock() -> bool:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return False
+            return True
+    deadline = time.monotonic() + max(0.0, retry_for_s)
+    while True:
+        if _try_lock():
+            return handle
+        if time.monotonic() >= deadline:
+            handle.close()
+            return None
+        time.sleep(0.1)
 
 
 def _persist_window_size(application: Application, width: int, height: int) -> None:
