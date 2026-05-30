@@ -273,7 +273,9 @@
     try {
       const catIds = categoryFilterIds();
       const resp = await api.listAssets({
-        tags_all: catIds === null ? filterTagIds : undefined,
+        // Tag filter and category filter combine via AND -- you can refine "clips in Players that
+        // ALSO have the 'kill' tag". Within categories it's OR (clip in ANY selected category).
+        tags_all: filterTagIds.length ? filterTagIds : undefined,
         in_categories: catIds ?? undefined,
         untagged: quick === 'untagged', never_opened: quick === 'new',
         text: appliedText.trim() || undefined, sort,
@@ -500,7 +502,7 @@
     try {
       const catIds = categoryFilterIds();
       const ids = await api.listAssetIds({
-        tags_all: catIds === null ? filterTagIds : undefined,
+        tags_all: filterTagIds.length ? filterTagIds : undefined,
         in_categories: catIds ?? undefined,
         untagged: quick === 'untagged', never_opened: quick === 'new',
         text: appliedText.trim() || undefined, sort, path_under: folderFilter ?? undefined,
@@ -946,6 +948,17 @@
   function childPageCategories(parentId: number): TagGroup[] {
     return tagGroups.filter((g) => g.has_page && g.parent_id === parentId);
   }
+  // Top-level categories (no parent) -- entry points for the sidebar Filters tree.
+  function rootCategoriesForFilter(): TagGroup[] {
+    return tagGroups.filter((g) => g.parent_id == null);
+  }
+  function childCategoriesForFilter(parentId: number): TagGroup[] {
+    return tagGroups.filter((g) => g.parent_id === parentId);
+  }
+  function tagsInCategory(catId: number): Tag[] {
+    return tags.filter((t) => t.group_id === catId);
+  }
+  let uncategorisedTags = $derived(tags.filter((t) => t.group_id == null));
   async function applyTag(tagId: number) {
     if (!detail) return;
     try { await api.applyTag(detail.id, tagId); await refreshDetail(); await loadTags(); } catch (e) { toast(String(e), 'error'); }
@@ -1418,28 +1431,22 @@
           {/each}
         </div>
       {/if}
-      {#if rootPageCategories().length}
-        <div class="sec-title">Categories</div>
-        {#each rootPageCategories() as g (g.id)}{@render catNavNode(g, 0)}{/each}
-      {/if}
-      <div class="sec-title">Tags</div>
-      {#each groupTags(tags, '') as section (section.group?.id ?? 'uncat')}
-        {#if section.group}
-          {@const g = section.group}
-          <div class="cat-sub-row">
-            <button class="cat-sub cat-sub-filter" class:on={filterCategoryIds.includes(g.id)} style:--c={g.color || 'var(--text-3)'} onclick={() => toggleCategoryFilter(g.id)} title="filter the library to this category (combines with tags + others)">{g.name}</button>
-            {#if g.has_page}<button class="cat-sub-go" onclick={() => openCategoryPage(g)} title="open this category's page">↗</button>{/if}
-          </div>
-        {/if}
+      <!-- Unified Filters tree: every category (even empty / direct-only) is filterable; nested
+           sub-categories sit indented under their parent; each leaf's tags follow. Category and tag
+           filters combine via AND, multi-select within each (categories OR-internally, tags AND). -->
+      <div class="sec-title">Filters</div>
+      {#each rootCategoriesForFilter() as g (g.id)}{@render catFilterNode(g, 0)}{/each}
+      {#if uncategorisedTags.length}
+        <div class="cat-sub" style:--c="var(--text-3)" style:margin-top="6px">Uncategorised</div>
         <div class="tagcloud" style:margin-bottom="6px">
-          {#each section.tags as t (t.id)}
+          {#each uncategorisedTags as t (t.id)}
             <button class="tagchip" class:on={filterTagIds.includes(t.id)} style:--c={t.color} style:background={filterTagIds.includes(t.id) ? t.color : ''} onclick={() => toggleTagFilter(t.id)}>
               {@render tagFace(t)} {t.name} <span class="n">{t.asset_count ?? 0}</span>
             </button>
           {/each}
         </div>
-      {/each}
-      {#if tags.length === 0}<span class="faint" style:font-size="12px">No tags yet — create some via “Tags”.</span>{/if}
+      {/if}
+      {#if tags.length === 0 && tagGroups.length === 0}<span class="faint" style:font-size="12px">No tags or categories yet — create some via “Tags”.</span>{/if}
       <div class="sec-title">Sources</div>
       {#each sources as s (s.id)}<div class="src" title={s.path}>{s.path}</div>{/each}
       <button class="btn sm" style:margin-top="6px" onclick={addSourcePrompt}>+ Add source folder</button>
@@ -1838,6 +1845,22 @@
 {/snippet}
 {#snippet tagFace(t: Tag)}{#if t.image_ref}<img class="tagimg" src="/api/tag-images/{t.image_ref}" alt="" />{:else if t.icon}{t.icon}{/if}{/snippet}
 {#snippet catNavNode(g: TagGroup, depth: number)}<button class="catnav" class:on={categoryPageId === g.id} style:padding-left={6 + depth * 14 + 'px'} style:--c={g.color || 'var(--text-3)'} onclick={() => openCategoryPage(g)}>📁 {g.name}</button>{#each childPageCategories(g.id) as c (c.id)}{@render catNavNode(c, depth + 1)}{/each}{/snippet}
+{#snippet catFilterNode(g: TagGroup, depth: number)}
+  <div class="cat-filter-row" style:padding-left={depth * 12 + 'px'}>
+    <button class="cat-filter-btn" class:on={filterCategoryIds.includes(g.id)} style:--c={g.color || 'var(--text-3)'} onclick={() => toggleCategoryFilter(g.id)} title="filter to this category (combines with tags + other categories)">📁 {g.name}</button>
+    {#if g.has_page}<button class="cat-filter-go" onclick={() => openCategoryPage(g)} title="open this category's page">↗</button>{/if}
+  </div>
+  {#each childCategoriesForFilter(g.id) as c (c.id)}{@render catFilterNode(c, depth + 1)}{/each}
+  {#if tagsInCategory(g.id).length}
+    <div class="tagcloud" style:padding-left={(depth + 1) * 12 + 'px'} style:margin-bottom="4px">
+      {#each tagsInCategory(g.id) as t (t.id)}
+        <button class="tagchip" class:on={filterTagIds.includes(t.id)} style:--c={t.color} style:background={filterTagIds.includes(t.id) ? t.color : ''} onclick={() => toggleTagFilter(t.id)}>
+          {@render tagFace(t)} {t.name} <span class="n">{t.asset_count ?? 0}</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
+{/snippet}
 {#snippet noteBody(body: string)}{#each splitMentions(body) as seg}{#if seg.id != null}{@const nm = seg.noteId != null ? detail?.mentioned_notes?.[String(seg.noteId)] : undefined}<!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions --><span class="mention" role="link" tabindex="0" onclick={() => (seg.noteId != null ? navToNote(seg.id ?? 0, seg.noteId) : navTo(seg.id ?? 0))} onmouseenter={(e) => showMentionPopup(e, seg.id ?? 0, seg.text, nm?.body, nm?.timestamp_ms)} onmouseleave={hideMentionPopup}>@{seg.text}{#if nm}<span class="ts-badge" style:margin-left="4px">{fmt(nm.timestamp_ms)}</span>{/if}</span>{:else}{seg.text}{/if}{/each}{/snippet}
 {#snippet refCard(r: ReferenceView, outgoing: boolean)}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -2170,6 +2193,13 @@
   .cat-sub { --c: var(--text-3); font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: color-mix(in srgb, var(--c) 70%, var(--text-3)); border-left: 3px solid var(--c); padding-left: 6px; margin: 4px 0 3px; }
   .cat-sub-row { display: flex; align-items: center; gap: 2px; }
   .cat-sub-filter { flex: 1; text-align: left; background: transparent; border: none; border-left: 3px solid var(--c); cursor: pointer; }
+  /* unified sidebar Filters tree (categories + their tags, nested) */
+  .cat-filter-row { display: flex; align-items: center; gap: 2px; margin: 2px 0 1px; }
+  .cat-filter-btn { --c: var(--text-3); flex: 1; text-align: left; background: transparent; border: none; border-left: 3px solid var(--c); padding: 3px 6px; font-size: 12px; font-weight: 700; color: var(--text-2); cursor: pointer; border-radius: 0 4px 4px 0; }
+  .cat-filter-btn:hover { color: var(--text); background: var(--bg-2); }
+  .cat-filter-btn.on { color: var(--accent); background: color-mix(in srgb, var(--c) 15%, transparent); }
+  .cat-filter-go { background: transparent; border: none; color: var(--text-3); font-size: 11px; cursor: pointer; padding: 0 4px; }
+  .cat-filter-go:hover { color: var(--accent); }
   .cat-sub-filter:hover { color: var(--accent); }
   .cat-sub-filter.on { color: var(--accent); background: var(--bg-2); }
   .cat-sub-go { background: transparent; border: none; color: var(--text-3); font-size: 11px; cursor: pointer; padding: 0 4px; }
