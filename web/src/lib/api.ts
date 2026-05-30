@@ -43,6 +43,27 @@ export interface Source { id: number; path: string; recursive: boolean; enabled:
 export interface SavedView { id: number; name: string; filter_json: string; sort_key: string; sort_order: number; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }
 export interface Folder { path: string; count: number; }
+export interface UpdateReleaseAsset { name: string; url: string; size: number; }
+export interface UpdateReleaseNote { version: string; name: string; published_at: string; body: string; }
+export interface UpdateStatus {
+  current_version: string;
+  mode: 'installed' | 'portable' | 'dev';
+  enabled: boolean;
+  latest_version: string | null;
+  release_url: string | null;
+  release_notes_chain: UpdateReleaseNote[];     // newest-first, every release strictly newer than current
+  setup_asset: UpdateReleaseAsset | null;
+  portable_asset: UpdateReleaseAsset | null;
+  notified_version: string | null;
+  skipped_version: string | null;
+  last_checked_at: number | null;
+  error: string | null;
+  has_update: boolean;
+  is_new_notification: boolean;                 // true once per new release, so the renderer auto-opens the modal exactly once per version
+}
+export interface UpdateInstallProgress {
+  downloaded: number; total: number; message: string; active: boolean;
+}
 export interface Health { name: string; ffmpeg: boolean; media_types: string[]; plugins: string[]; }
 export interface EditingConfig {
   reencode: boolean; reencode_crf: number; reencode_preset: string;
@@ -192,4 +213,13 @@ export const api = {
   // tag set with EXACTLY that. Otherwise add/remove are applied as a diff over existing tags.
   bulkTags: (ids: number[], ops: { add?: number[]; remove?: number[]; replace_with?: number[] | null }) =>
     req<{ added: number; removed: number }>('POST', '/api/assets/bulk-tags', { ids, ...ops }),
+  // GitHub-release based update check + one-click install. The status carries every release between
+  // the running version and the latest (newest-first); the install endpoint hands off to Inno's
+  // CloseApplications flow (installed) or the rename-trick portable swap (portable).
+  getUpdateStatus: () => req<UpdateStatus>('GET', '/api/updates/status'),
+  forceUpdateCheck: () => req<UpdateStatus>('POST', '/api/updates/check'),
+  installUpdate: () => req<{ started?: boolean; already_running?: boolean; version?: string; mode?: string }>('POST', '/api/updates/install'),
+  getUpdateInstallProgress: () => req<UpdateInstallProgress>('GET', '/api/updates/install-progress'),
+  dismissUpdate: () => req<UpdateStatus>('POST', '/api/updates/dismiss'),
+  skipUpdate: () => req<UpdateStatus>('POST', '/api/updates/skip'),
 };

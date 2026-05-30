@@ -23,6 +23,7 @@ from clippycap.app.bootstrap import Application
 from clippycap.app.ffmpeg_service import FfmpegStatus
 from clippycap.app.reference_service import ReferenceView
 from clippycap.app.services import AssetDetail, AssetSummary, NoteView
+from clippycap.app.update_service import ReleaseAsset, UpdateStatus
 from clippycap.core.entities import Asset, ReferenceType, Source, Tag, TagGroup
 from clippycap.core.errors import ClippycapError, ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.query import AssetFilter
@@ -62,6 +63,35 @@ def _tag_group_dict(group: TagGroup) -> dict[str, Any]:
         "id": group.id, "name": group.name, "color": group.color,
         "sort_order": group.sort_order, "has_page": group.has_page,
         "parent_id": group.parent_id, "notes": group.notes,
+    }
+
+
+def _update_asset_dict(a: ReleaseAsset | None) -> dict[str, Any] | None:
+    if a is None:
+        return None
+    return {"name": a.name, "url": a.url, "size": a.size}
+
+
+def _update_status_dict(s: UpdateStatus) -> dict[str, Any]:
+    return {
+        "current_version": s.current_version,
+        "mode": s.mode,
+        "enabled": s.enabled,
+        "latest_version": s.latest_version,
+        "release_url": s.release_url,
+        "release_notes_chain": [
+            {"version": n.version, "name": n.name,
+             "published_at": n.published_at, "body": n.body}
+            for n in s.release_notes_chain
+        ],
+        "setup_asset": _update_asset_dict(s.setup_asset),
+        "portable_asset": _update_asset_dict(s.portable_asset),
+        "notified_version": s.notified_version,
+        "skipped_version": s.skipped_version,
+        "last_checked_at": s.last_checked_at,
+        "error": s.error,
+        "has_update": s.has_update,
+        "is_new_notification": s.is_new_notification,
     }
 
 
@@ -646,6 +676,35 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     def remove_asset_category(app: AppDep, asset_id: int, category_id: int) -> Response:
         app.assets.remove_category(asset_id, category_id)
         return Response(status_code=204)
+
+    # ---- updates (GitHub Releases check + one-click install) ----------------
+    @api.get("/api/updates/status")
+    def update_status(app: AppDep) -> dict[str, Any]:
+        return _update_status_dict(app.updates.get_status())
+
+    @api.post("/api/updates/check")
+    def update_check(app: AppDep) -> dict[str, Any]:
+        """Skip the cache and re-hit the GitHub Releases endpoint right now."""
+        return _update_status_dict(app.updates.get_status(force_check=True))
+
+    @api.post("/api/updates/install")
+    def update_install(app: AppDep) -> dict[str, Any]:
+        return app.updates.start_install()
+
+    @api.get("/api/updates/install-progress")
+    def update_install_progress(app: AppDep) -> dict[str, Any]:
+        return app.updates.install_progress
+
+    @api.post("/api/updates/dismiss")
+    def update_dismiss(app: AppDep) -> dict[str, Any]:
+        """Mark the current latest version as "seen" so subsequent sessions just show the badge
+        instead of auto-popping the modal again."""
+        return _update_status_dict(app.updates.mark_notified())
+
+    @api.post("/api/updates/skip")
+    def update_skip(app: AppDep) -> dict[str, Any]:
+        """Hide the badge for this version (and any older) until a strictly newer one ships."""
+        return _update_status_dict(app.updates.mark_skipped())
 
     # ---- notes (by id) ---------------------------------------------------
 

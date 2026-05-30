@@ -167,6 +167,12 @@ class FirstRunConfig(_Section):
     suggest_sources: list[str]
 
 
+class UpdatesConfig(_Section):
+    enabled: bool
+    repository: str = Field(min_length=1)        # "owner/name" on GitHub
+    check_interval_hours: int = Field(ge=1, le=720)
+
+
 class Config(_Section):
     """The fully resolved, validated application configuration."""
 
@@ -188,6 +194,7 @@ class Config(_Section):
     plugins: PluginsConfig
     seed: SeedConfig
     firstrun: FirstRunConfig
+    updates: UpdatesConfig
 
     @model_validator(mode="after")
     def _check_cross_references(self) -> Config:

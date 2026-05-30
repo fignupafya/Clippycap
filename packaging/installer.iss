@@ -16,7 +16,7 @@
 ; which is installed alongside the app.
 
 #define AppName        "Clippycap"
-#define AppVersion     "0.3.0"
+#define AppVersion     "0.4.0"
 #define AppPublisher   "Clippycap"
 #define AppExeName     "Clippycap.exe"
 #define AppSourceDir   "..\dist\Clippycap"

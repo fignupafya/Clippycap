@@ -22,6 +22,7 @@ from clippycap.app.reference_service import ReferenceService, ReferenceTypeServi
 from clippycap.app.scan_service import ScanService
 from clippycap.app.services import AssetService, NoteService, TagGroupService, TagService
 from clippycap.app.source_service import SavedViewService, SourceService
+from clippycap.app.update_service import UpdateService
 from clippycap.core.entities import ReferenceType
 from clippycap.infra.config import Config, ConfigHolder, load_config
 from clippycap.infra.config.loader import default_install_dir
@@ -69,6 +70,7 @@ class Application:
     editing: EditingService
     config_service: ConfigService
     ffmpeg: FfmpegService
+    updates: UpdateService
     loaded_plugins: list[str]
     data_dir: Path
     thumbnail_dir: Path
@@ -187,6 +189,9 @@ def build_application(
         jobs=jobs, data_dir=data_dir, install_dir=install_dir,
         on_tools_changed=scan_service.enrich_pending,
     )
+    update_service = UpdateService(
+        config_holder=config_holder, database=database, data_dir=data_dir,
+    )
 
     return Application(
         config_holder=config_holder, ffmpeg_tools=ffmpeg_tools, database=database, event_bus=event_bus,
@@ -198,6 +203,7 @@ def build_application(
         saved_views=SavedViewService(database),
         scans=scan_service,
         editing=editing_service, config_service=config_service, ffmpeg=ffmpeg_service,
+        updates=update_service,
         loaded_plugins=loaded_plugins, data_dir=data_dir, thumbnail_dir=thumbnail_dir,
         tag_images_dir=tag_images_dir, install_dir=install_dir,
     )

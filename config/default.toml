@@ -237,6 +237,19 @@ name    = "excerpt of"
 reverse = "has excerpt"
 color   = "#f0a64f"
 
+[updates]
+# Quiet background check against the configured GitHub repository's Releases API. When a newer
+# release is published the title bar gets a small "↓ Update" badge; clicking it shows the
+# cumulative release notes (every release between yours and the latest) and -- for installed or
+# portable builds -- an "Install update" button that handles download + restart in one click.
+#
+# This is a single anonymous HTTPS request per check. The result is cached for
+# `check_interval_hours`, so re-opening the app several times in a row only hits GitHub once.
+# Set `enabled = false` if you'd rather check for updates by hand.
+enabled              = true
+repository           = "fignupafya/Clippycap"
+check_interval_hours = 24
+
 [firstrun]
 # On first run, offer to add these folders as sources (existing ones only; the user confirms).
 # "@videos" -> the OS "Videos" library folder.

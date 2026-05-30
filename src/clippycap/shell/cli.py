@@ -34,6 +34,7 @@ import uvicorn
 
 from clippycap.api.app import create_app
 from clippycap.app.bootstrap import Application, build_application
+from clippycap.app.update_service import cleanup_stale_backups
 from clippycap.core.errors import ClippycapError
 from clippycap.infra.config.loader import default_install_dir
 from clippycap.infra.config.schema import ShellConfig
@@ -367,9 +368,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # Heal the library in the background before the user does anything: re-identify a library left
     # on a superseded identity format (submitted first, so any later scan queues behind it), then
     # finish metadata for clips a previous run left pending. Both are instant no-ops when there is
-    # nothing to do.
+    # nothing to do. We also remove any leftover ``<stem>.old.exe`` backup from a previous
+    # portable self-update so backups don't pile up over time.
     application.scans.upgrade_identity_format()
     application.scans.enrich_pending()
+    cleanup_stale_backups()
     api = create_app(application)
     cfg = application.config
     host = cfg.server.host

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
   import { api } from './lib/api';
-  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Folder, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag, TagGroup } from './lib/api';
+  import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Folder, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag, TagGroup, UpdateInstallProgress, UpdateStatus } from './lib/api';
   import WindowControls from './lib/WindowControls.svelte';
   import Pager from './lib/Pager.svelte';
   import logoUrl from './assets/clippycap-logo.png';
@@ -93,6 +93,14 @@
   let appliedText = $state('');
   let sort = $state('recorded_desc');
   let folders = $state<Folder[]>([]);                       // flat /api/folders response
+  // GitHub-release update check + one-click install. ``updateStatus`` is the server's view
+  // (cached for 24h on its side); ``updateModalOpen`` tracks whether the modal is showing;
+  // ``updateInstalling`` and ``updateProgress`` drive the in-modal progress bar.
+  let updateStatus = $state<UpdateStatus | null>(null);
+  let updateModalOpen = $state(false);
+  let updateInstalling = $state(false);
+  let updateProgress = $state<UpdateInstallProgress | null>(null);
+  let updateError = $state<string | null>(null);
   let folderFilter = $state<string | null>(null);            // narrow the grid to clips under this folder
   let expandedFolders = $state<Set<string>>(new Set());      // which tree nodes are open
   let folderTree = $derived(buildFolderTree(folders));
@@ -265,6 +273,47 @@
   }
   async function loadSources() { try { sources = await api.listSources(); } catch (e) { error = String(e); } }
   async function loadFolders() { try { folders = await api.listFolders(); } catch { /* best effort */ } }
+  async function loadUpdateStatus() {
+    try {
+      updateStatus = await api.getUpdateStatus();
+      // Auto-open the modal exactly once per newly-detected release; the dismiss call records
+      // that we've shown it, so the next session shows just the badge until a newer one ships.
+      if (updateStatus.has_update && updateStatus.is_new_notification) {
+        updateModalOpen = true;
+        try { updateStatus = await api.dismissUpdate(); } catch { /* harmless if it fails */ }
+      }
+    } catch { /* check failures are silent -- the badge just doesn't appear */ }
+  }
+  async function startUpdateInstall() {
+    if (!updateStatus?.has_update || updateInstalling) return;
+    if (updateStatus.mode === 'dev') {
+      if (updateStatus.release_url) window.open(updateStatus.release_url, '_blank', 'noopener');
+      return;
+    }
+    updateError = null; updateInstalling = true;
+    try {
+      const r = await api.installUpdate();
+      if (r.already_running) return;
+      // Poll the progress until the job clears `active`. Network errors mid-install are tolerated
+      // -- the installer / portable swap may already be tearing this process down.
+      const handle = setInterval(async () => {
+        try {
+          updateProgress = await api.getUpdateInstallProgress();
+          if (!updateProgress.active) {
+            clearInterval(handle);
+            if (updateProgress.message.startsWith('failed')) {
+              updateError = updateProgress.message.replace(/^failed:\s*/, '');
+              updateInstalling = false;
+            }
+          }
+        } catch { /* the installer is closing us; expected near the end */ }
+      }, 500);
+    } catch (e) { updateError = String(e); updateInstalling = false; }
+  }
+  async function skipThisUpdate() {
+    try { updateStatus = await api.skipUpdate(); updateModalOpen = false; }
+    catch (e) { toast(String(e), 'error'); }
+  }
   // Fetch the current page of the grid. The grid only ever holds `pageSize` cards, so the DOM (and
   // the thumbnail load) stays bounded however large the library is. Used for plain refreshes too
   // (after a tag/note/edit change) -- it does NOT scroll; `reloadGrid` is the query/page entry point.
@@ -394,7 +443,7 @@
     }
     document.addEventListener('mousedown', onCaptureMouseDown, { capture: true });
     // (no cleanup -- App.svelte is the root component, never unmounts during the app's lifetime)
-    void loadTags(); void loadSources(); void loadFolders();
+    void loadTags(); void loadSources(); void loadFolders(); void loadUpdateStatus();
     void watchLibraryJobs();   // pick up any scan / enrichment / identity-upgrade job running at startup
     void api.getConfig().then((c) => {
       cfg = c;
@@ -1402,6 +1451,10 @@
     <div class="topbar-fill pywebview-drag-region"></div>
     <button class="btn sm" onclick={scanAll} disabled={scanJob !== null}>{scanJob ? scanLabel(scanJob) : 'Scan'}</button>
     <button class="btn sm" onclick={() => (showTags = true)}>Tags</button>
+    {#if updateStatus?.has_update}
+      <button class="btn sm update-badge" onclick={() => (updateModalOpen = true)}
+              title="Clippycap v{updateStatus.latest_version} is available — click for details">↓ v{updateStatus.latest_version}</button>
+    {/if}
     <button class="btn sm" onclick={openSettings} disabled={!cfg} title="Settings">⚙ Settings</button>
     {#if nativeWindow}<WindowControls />{/if}
   </header>
@@ -2028,6 +2081,62 @@
   </div>
 {/if}
 
+{#if updateModalOpen && updateStatus?.has_update}
+  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+  <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget && !updateInstalling) updateModalOpen = false; }}>
+    <div class="modal update-modal">
+      <div class="mtop">
+        <h3>Update available — Clippycap v{updateStatus.latest_version}</h3>
+        <span style:flex="1"></span>
+        <button class="btn sm" disabled={updateInstalling} onclick={() => (updateModalOpen = false)}>Close</button>
+      </div>
+      <div class="mbody">
+        <p class="faint" style:margin="0 0 12px">
+          You're on v{updateStatus.current_version}.
+          {#if updateStatus.release_notes_chain.length > 1}
+            {updateStatus.release_notes_chain.length} releases to catch up on — all the changes below are included in the update:
+          {:else}
+            What changed:
+          {/if}
+        </p>
+        {#each updateStatus.release_notes_chain as note (note.version)}
+          <div class="rel-note">
+            <h4>v{note.version}{note.name && note.name !== 'v' + note.version ? ' — ' + note.name : ''}</h4>
+            {#if note.published_at}<div class="faint rel-date">{note.published_at.slice(0, 10)}</div>{/if}
+            <pre class="rel-body">{note.body || '(no notes)'}</pre>
+          </div>
+        {/each}
+        {#if updateInstalling}
+          <div class="rel-progress">
+            <div class="rel-progress-msg">{updateProgress?.message ?? 'Working…'}</div>
+            {#if updateProgress && updateProgress.total > 0}
+              <div class="rel-progress-bar"><div class="rel-progress-fill" style:width={Math.min(100, updateProgress.downloaded / updateProgress.total * 100) + '%'}></div></div>
+              <div class="faint rel-progress-num">{Math.round(updateProgress.downloaded / 1024 / 1024)} / {Math.round(updateProgress.total / 1024 / 1024)} MB</div>
+            {/if}
+            {#if updateStatus.mode === 'installed'}
+              <div class="faint" style:margin-top="6px">The installer will close Clippycap, swap files, and restart it automatically.</div>
+            {:else if updateStatus.mode === 'portable'}
+              <div class="faint" style:margin-top="6px">Your portable binary will be replaced in place; Clippycap restarts itself.</div>
+            {/if}
+          </div>
+        {/if}
+        {#if updateError}<div class="err" style:margin-top="10px">Install failed: {updateError}</div>{/if}
+        <div class="rel-actions">
+          <button class="btn sm" disabled={updateInstalling} onclick={skipThisUpdate} title="Hide this version's badge; you'll be notified again only for newer releases.">Skip this version</button>
+          <span style:flex="1"></span>
+          {#if updateStatus.release_url}
+            <a class="btn sm" href={updateStatus.release_url} target="_blank" rel="noopener">View on GitHub</a>
+          {/if}
+          <button class="btn sm" disabled={updateInstalling} onclick={() => (updateModalOpen = false)}>Later</button>
+          {#if updateStatus.mode !== 'dev'}
+            <button class="btn sm primary" disabled={updateInstalling} onclick={startUpdateInstall}>{updateInstalling ? 'Installing…' : 'Install update'}</button>
+          {/if}
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
 {#if showBulkTagModal}
   <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
   <div class="modal-bg" onclick={(e) => { if (e.target === e.currentTarget) closeBulkTagModal(); }}>
@@ -2372,6 +2481,24 @@
   .x:hover { color: #ef5b5b; }
   .modal-bg { position: fixed; inset: 0; background: rgba(4,6,9,.66); display: grid; place-items: center; z-index: 60; padding: 30px; }
   .modal { width: min(560px, 100%); max-height: 80vh; background: var(--bg-1); border: 1px solid var(--border); border-radius: var(--r); display: flex; flex-direction: column; overflow: hidden; }
+  /* update badge in the title bar + the update modal's content */
+  .update-badge { background: var(--accent); color: #1b1206; border-color: transparent; font-weight: 700; animation: update-pulse 2.6s ease-in-out infinite; }
+  .update-badge:hover { background: var(--accent); filter: brightness(1.08); }
+  @keyframes update-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 55%, transparent); }
+    50%      { box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent); }
+  }
+  .update-modal { width: min(640px, 100%); }
+  .rel-note { border-left: 3px solid var(--accent); padding: 6px 10px; margin: 10px 0; background: var(--bg-2); border-radius: 0 6px 6px 0; }
+  .rel-note h4 { margin: 0; font-size: 13px; }
+  .rel-date { font-size: 11px; margin-top: 1px; }
+  .rel-body { white-space: pre-wrap; font: 12px/1.55 ui-monospace, Menlo, Consolas, monospace; background: var(--bg-3); padding: 8px 10px; border-radius: 4px; max-height: 200px; overflow: auto; margin: 6px 0 0; color: var(--text-2); }
+  .rel-progress { background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px; margin: 12px 0 4px; }
+  .rel-progress-msg { font-size: 12px; color: var(--text-2); margin-bottom: 6px; }
+  .rel-progress-bar { height: 6px; background: var(--bg-3); border-radius: 3px; overflow: hidden; }
+  .rel-progress-fill { height: 100%; background: var(--accent); transition: width 250ms ease; }
+  .rel-progress-num { font-size: 11px; margin-top: 4px; }
+  .rel-actions { display: flex; gap: 6px; align-items: center; margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border); }
   .mtop { display: flex; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
   .mtop h3 { font-size: 15px; }
   .mbody { padding: 14px 16px; overflow-y: auto; }
