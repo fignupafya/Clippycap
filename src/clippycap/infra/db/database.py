@@ -14,7 +14,11 @@ from pathlib import Path
 
 from clippycap.core.ports import (
     AssetRepository,
+    AttachmentOverrideRepository,
+    AttachmentRepository,
     HashCacheStore,
+    LinkerFileCacheStore,
+    LinkerRepository,
     MetaStore,
     NoteRepository,
     ReferenceRepository,
@@ -50,6 +54,10 @@ class SqliteUnitOfWork:
         self.references: ReferenceRepository = repos.SqliteReferenceRepository(conn)
         self.sources: SourceRepository = repos.SqliteSourceRepository(conn)
         self.saved_views: SavedViewRepository = repos.SqliteSavedViewRepository(conn)
+        self.linkers: LinkerRepository = repos.SqliteLinkerRepository(conn)
+        self.attachments: AttachmentRepository = repos.SqliteAttachmentRepository(conn)
+        self.attachment_overrides: AttachmentOverrideRepository = repos.SqliteAttachmentOverrideRepository(conn)
+        self.linker_file_cache: LinkerFileCacheStore = repos.SqliteLinkerFileCacheStore(conn)
         self.hash_cache: HashCacheStore = repos.SqliteHashCacheStore(conn)
         self.meta: MetaStore = repos.SqliteMetaStore(conn)
 

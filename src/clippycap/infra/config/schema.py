@@ -173,6 +173,15 @@ class UpdatesConfig(_Section):
     check_interval_hours: int = Field(ge=1, le=720)
 
 
+class LinkersConfig(_Section):
+    """Global switches for the companion-file linker subsystem; each linker's rule lives in its own
+    ``definition_json`` (a DB row), not here."""
+
+    enabled: bool                                # master switch for the whole subsystem
+    run_on_scan: bool                            # re-run enabled linkers after a library scan
+    run_on_focus: bool                           # re-run enabled linkers on window focus (cheap re-sync)
+
+
 class Config(_Section):
     """The fully resolved, validated application configuration."""
 
@@ -195,6 +204,7 @@ class Config(_Section):
     seed: SeedConfig
     firstrun: FirstRunConfig
     updates: UpdatesConfig
+    linkers: LinkersConfig
 
     @model_validator(mode="after")
     def _check_cross_references(self) -> Config:

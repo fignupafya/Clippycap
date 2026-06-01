@@ -4,6 +4,8 @@
   import type { AppConfig, AssetDetail, AssetSummary, EditingConfig, FfmpegStatus, Folder, Job, Note, PlayerConfig, ReferenceView, SavedView, Source, Tag, TagGroup, UpdateInstallProgress, UpdateStatus } from './lib/api';
   import WindowControls from './lib/WindowControls.svelte';
   import Pager from './lib/Pager.svelte';
+  import LinkersPage from './lib/linkers/LinkersPage.svelte';
+  import LinkedFilesPanel from './lib/linkers/LinkedFilesPanel.svelte';
   import logoUrl from './assets/clippycap-logo.png';
 
   type Quick = 'all' | 'untagged' | 'new';
@@ -167,6 +169,7 @@
   let showTags = $state(false);
   let showKeys = $state(false);
   let showSettings = $state(false);
+  let showLinkers = $state(false);
   let settingsTab = $state<'editing' | 'player' | 'keys' | 'ffmpeg'>('editing');
   let pendingEditing = $state<EditingConfig | null>(null);
   let pendingPlayer = $state<PlayerConfig | null>(null);
@@ -1509,6 +1512,7 @@
     <div class="topbar-fill pywebview-drag-region"></div>
     <button class="btn sm" onclick={scanAll} disabled={scanJob !== null}>{scanJob ? scanLabel(scanJob) : 'Scan'}</button>
     <button class="btn sm" onclick={() => (showTags = true)}>Tags</button>
+    <button class="btn sm" onclick={() => (showLinkers = true)} title="Linkers — auto-attach companion files (demos, scripts…)">Linkers</button>
     {#if updateStatus?.has_update}
       <button class="btn sm update-badge" onclick={() => (updateModalOpen = true)}
               title="Clippycap v{updateStatus.latest_version} is available — click for details">↓ v{updateStatus.latest_version}</button>
@@ -1914,11 +1918,19 @@
         <h4>Clips referencing this one</h4>
         {#each refs.incoming as r (r.id)}{@render refCard(r, false)}{/each}
         {#if refs.incoming.length === 0}<span class="faint">nothing references this clip yet.</span>{/if}
+        <LinkedFilesPanel assetId={d.id} />
         <h4>File</h4>
         {#each d.paths as p (p.path)}<div class="src" class:miss={!p.present} title={p.path}>{p.present ? '✓' : '✗'} {p.path}</div>{/each}
         <div class="faint" style:font-size="11px" style:margin-top="6px">Rename via the clip's title above — it renames the file itself.</div>
       </div>
     </div>
+  </div>
+{/if}
+
+{#if showLinkers}
+  <div class="overlay">
+    {#if nativeWindow}<div class="linkers-wc"><WindowControls /></div>{/if}
+    <LinkersPage onClose={() => (showLinkers = false)} />
   </div>
 {/if}
 
@@ -2504,6 +2516,7 @@
   .pill { color: #f7f9fb; text-shadow: -1px -1px 0 rgba(0,0,0,.72), 1px -1px 0 rgba(0,0,0,.72), -1px 1px 0 rgba(0,0,0,.72), 1px 1px 0 rgba(0,0,0,.72); }
   .pill .x { font-weight: 800; }
   .overlay { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; z-index: 50; }
+  .linkers-wc { position: absolute; top: 6px; right: 8px; z-index: 2; }
   .otop { display: flex; align-items: center; gap: 12px; padding: 0 14px; height: 60px; background: var(--bg-1); border-bottom: 1px solid var(--border); flex: none; }
   .otop-fill { flex: 1; min-width: 12px; align-self: stretch; }
   .otitle { font-weight: 700; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

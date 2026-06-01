@@ -43,6 +43,30 @@ export interface Source { id: number; path: string; recursive: boolean; enabled:
 export interface SavedView { id: number; name: string; filter_json: string; sort_key: string; sort_order: number; }
 export interface Job { id: string; name: string; state: string; scanned: number; total: number | null; message: string; error: string | null; }
 export interface Folder { path: string; count: number; }
+// Companion-file linkers. `definition_json` is the full rule (LinkerDefinition); the builder edits a
+// parsed copy and sends it back as a string. The frontend treats the definition as an opaque object
+// of the shape the backend validates, so we keep it loosely typed here.
+export interface Linker {
+  id: number; name: string; description: string; color: string; enabled: boolean;
+  sort_order: number; schema_version: number; definition_json: string;
+  created_at: string | null; updated_at: string | null;
+}
+export interface LinkerPreset { key: string; name: string; description: string; color: string; definition_json: string; }
+export interface Attachment {
+  id: number; asset_id: number; linker_id: number; path: string; label: string; ext: string;
+  score: number; matched: Record<string, unknown>; status: string; origin: string; size: number | null;
+}
+export interface PreviewLink { clip_id: number; file_path: string; score: number; origin: string; reasons: string[]; }
+export interface PreviewResult {
+  links: PreviewLink[];
+  ambiguous: Record<string, { file_path: string; score: number }[]>;
+  unmatched_clip_ids: number[];
+  unused_files: string[];
+  clip_errors: Record<string, Record<string, string>>;
+  file_errors: Record<string, Record<string, string>>;
+  candidate_count: number;
+  counts: { matched: number; links: number; ambiguous: number; unmatched: number; unused: number };
+}
 export interface UpdateReleaseAsset { name: string; url: string; size: number; }
 export interface UpdateReleaseNote { version: string; name: string; published_at: string; body: string; }
 export interface UpdateStatus {
@@ -226,4 +250,27 @@ export const api = {
   getUpdateInstallProgress: () => req<UpdateInstallProgress>('GET', '/api/updates/install-progress'),
   dismissUpdate: () => req<UpdateStatus>('POST', '/api/updates/dismiss'),
   skipUpdate: () => req<UpdateStatus>('POST', '/api/updates/skip'),
+  // ---- companion-file linkers ----
+  listLinkers: () => req<Linker[]>('GET', '/api/linkers'),
+  getLinkerPresets: () => req<LinkerPreset[]>('GET', '/api/linkers/presets'),
+  getLinker: (id: number) => req<Linker>('GET', `/api/linkers/${id}`),
+  createLinker: (body: { name: string; definition_json: string; description?: string; color?: string; enabled?: boolean }) =>
+    req<Linker>('POST', '/api/linkers', body),
+  updateLinker: (id: number, body: { name: string; definition_json: string; description: string; color: string; enabled: boolean }) =>
+    req<Linker>('PUT', `/api/linkers/${id}`, body),
+  deleteLinker: (id: number) => req<void>('DELETE', `/api/linkers/${id}`),
+  setLinkerEnabled: (id: number, enabled: boolean) => req<Linker>('POST', `/api/linkers/${id}/enabled`, { enabled }),
+  cloneLinker: (id: number) => req<Linker>('POST', `/api/linkers/${id}/clone`),
+  reorderLinkers: (ids: number[]) => req<void>('POST', '/api/linkers/reorder', { ids }),
+  runLinker: (id: number) => req<{ job_id: string }>('POST', `/api/linkers/${id}/run`),
+  runAllLinkers: () => req<{ job_id: string }>('POST', '/api/linkers/run-all'),
+  previewLinker: (definition_json: string) => req<PreviewResult>('POST', '/api/linkers/preview', { definition_json }),
+  assetAttachments: (assetId: number) => req<Attachment[]>('GET', `/api/assets/${assetId}/attachments`),
+  setOverride: (assetId: number, body: { linker_id: number; path: string; decision: 'pin' | 'exclude' }) =>
+    req<void>('POST', `/api/assets/${assetId}/overrides`, body),
+  clearOverride: (assetId: number, body: { linker_id: number; path: string }) =>
+    req<void>('POST', `/api/assets/${assetId}/overrides/clear`, body),
+  revealAttachment: (id: number) => req<void>('POST', `/api/attachments/${id}/reveal`),
+  openAttachment: (id: number) => req<void>('POST', `/api/attachments/${id}/open`),
+  openAttachmentWith: (id: number, action: string) => req<void>('POST', `/api/attachments/${id}/open-with`, { action }),
 };

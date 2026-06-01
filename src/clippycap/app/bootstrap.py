@@ -18,6 +18,8 @@ from clippycap.app.config_service import ConfigService
 from clippycap.app.editing_service import EditingService
 from clippycap.app.ffmpeg_service import FfmpegService
 from clippycap.app.jobs import ThreadJobQueue
+from clippycap.app.linker_runner import LinkerRunner
+from clippycap.app.linker_service import LinkerService
 from clippycap.app.reference_service import ReferenceService, ReferenceTypeService
 from clippycap.app.scan_service import ScanService
 from clippycap.app.services import AssetService, NoteService, TagGroupService, TagService
@@ -71,6 +73,7 @@ class Application:
     config_service: ConfigService
     ffmpeg: FfmpegService
     updates: UpdateService
+    linkers: LinkerService
     loaded_plugins: list[str]
     data_dir: Path
     thumbnail_dir: Path
@@ -192,6 +195,7 @@ def build_application(
     update_service = UpdateService(
         config_holder=config_holder, database=database, data_dir=data_dir,
     )
+    linker_service = LinkerService(database=database, jobs=jobs, runner=LinkerRunner(database))
 
     return Application(
         config_holder=config_holder, ffmpeg_tools=ffmpeg_tools, database=database, event_bus=event_bus,
@@ -203,7 +207,7 @@ def build_application(
         saved_views=SavedViewService(database),
         scans=scan_service,
         editing=editing_service, config_service=config_service, ffmpeg=ffmpeg_service,
-        updates=update_service,
+        updates=update_service, linkers=linker_service,
         loaded_plugins=loaded_plugins, data_dir=data_dir, thumbnail_dir=thumbnail_dir,
         tag_images_dir=tag_images_dir, install_dir=install_dir,
     )

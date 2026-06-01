@@ -286,6 +286,67 @@ _MIGRATION_V10 = (
 )
 
 
+# v11: LINKERS -- user-defined rules that auto-attach companion files (demos, scripts, transcripts,
+# RAWs, ...) to assets. A linker's whole rule (scopes / field extraction / transforms / match
+# predicates / resolution policy / open-with actions) is a versioned JSON blob (`definition_json`),
+# so the rule language can evolve without a migration per tweak and linkers export/import as JSON.
+# `asset_attachments` holds the resolved links; `attachment_overrides` are the manual pin/exclude
+# tombstones that survive every re-run; `linker_file_cache` makes incremental runs cheap. All cascade
+# on asset/linker deletion. Entirely additive -- nothing here touches existing tables.
+_MIGRATION_V11 = """
+CREATE TABLE linkers (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL UNIQUE,
+    description    TEXT NOT NULL DEFAULT '',
+    color          TEXT NOT NULL DEFAULT '',
+    enabled        INTEGER NOT NULL DEFAULT 0,
+    sort_order     INTEGER NOT NULL DEFAULT 0,
+    schema_version INTEGER NOT NULL DEFAULT 1,
+    definition_json TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    updated_at     TEXT NOT NULL
+);
+
+CREATE TABLE asset_attachments (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id         INTEGER NOT NULL REFERENCES assets(id)   ON DELETE CASCADE,
+    linker_id        INTEGER NOT NULL REFERENCES linkers(id)  ON DELETE CASCADE,
+    path             TEXT NOT NULL,
+    label            TEXT NOT NULL DEFAULT '',
+    ext              TEXT NOT NULL DEFAULT '',
+    score            REAL NOT NULL DEFAULT 0,
+    matched_json     TEXT NOT NULL DEFAULT '{}',
+    status           TEXT NOT NULL DEFAULT 'linked',   -- linked | missing
+    origin           TEXT NOT NULL DEFAULT 'auto',     -- auto | manual (a pinned file)
+    size             INTEGER,
+    mtime_ns         INTEGER,
+    created_at       TEXT NOT NULL,
+    last_verified_at TEXT,
+    UNIQUE (asset_id, linker_id, path)
+);
+CREATE INDEX idx_attachments_asset  ON asset_attachments(asset_id);
+CREATE INDEX idx_attachments_linker ON asset_attachments(linker_id);
+
+CREATE TABLE attachment_overrides (
+    asset_id   INTEGER NOT NULL REFERENCES assets(id)  ON DELETE CASCADE,
+    linker_id  INTEGER NOT NULL REFERENCES linkers(id) ON DELETE CASCADE,
+    path       TEXT NOT NULL,
+    decision   TEXT NOT NULL,                          -- pin | exclude
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (asset_id, linker_id, path)
+);
+
+CREATE TABLE linker_file_cache (
+    linker_id   INTEGER NOT NULL REFERENCES linkers(id) ON DELETE CASCADE,
+    path        TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    mtime_ns    INTEGER NOT NULL,
+    fields_json TEXT NOT NULL,
+    PRIMARY KEY (linker_id, path)
+);
+"""
+
+
 # A migration step is SQL (run with executescript) or a callable for data migrations needing logic.
 MigrationStep = str | Callable[[sqlite3.Connection], None]
 
@@ -300,5 +361,6 @@ MIGRATIONS: tuple[tuple[int, MigrationStep], ...] = (
     (8, _MIGRATION_V8),
     (9, _MIGRATION_V9),
     (10, _MIGRATION_V10),
+    (11, _MIGRATION_V11),
 )
 LATEST_VERSION: int = MIGRATIONS[-1][0]

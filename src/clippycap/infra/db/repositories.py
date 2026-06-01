@@ -15,6 +15,9 @@ from typing import Any
 from clippycap.core.entities import (
     Asset,
     AssetPath,
+    Attachment,
+    AttachmentOverride,
+    Linker,
     Note,
     Reference,
     ReferenceType,
@@ -169,6 +172,47 @@ def _source(r: sqlite3.Row) -> Source:
 def _saved_view(r: sqlite3.Row) -> SavedView:
     return SavedView(
         name=r["name"], filter_json=r["filter_json"], sort_key=r["sort_key"], sort_order=r["sort_order"], id=r["id"]
+    )
+
+
+def _linker(r: sqlite3.Row) -> Linker:
+    return Linker(
+        name=r["name"],
+        definition_json=r["definition_json"],
+        description=r["description"],
+        color=r["color"],
+        enabled=bool(r["enabled"]),
+        sort_order=r["sort_order"],
+        schema_version=r["schema_version"],
+        created_at=_from_iso(r["created_at"]),
+        updated_at=_from_iso(r["updated_at"]),
+        id=r["id"],
+    )
+
+
+def _attachment(r: sqlite3.Row) -> Attachment:
+    return Attachment(
+        asset_id=r["asset_id"],
+        linker_id=r["linker_id"],
+        path=r["path"],
+        label=r["label"],
+        ext=r["ext"],
+        score=r["score"],
+        matched=dict(json.loads(r["matched_json"])),
+        status=r["status"],
+        origin=r["origin"],
+        size=r["size"],
+        mtime_ns=r["mtime_ns"],
+        created_at=_from_iso(r["created_at"]),
+        last_verified_at=_from_iso(r["last_verified_at"]),
+        id=r["id"],
+    )
+
+
+def _override(r: sqlite3.Row) -> AttachmentOverride:
+    return AttachmentOverride(
+        asset_id=r["asset_id"], linker_id=r["linker_id"], path=r["path"],
+        decision=r["decision"], created_at=_from_iso(r["created_at"]),
     )
 
 
@@ -823,6 +867,194 @@ class SqliteSavedViewRepository(_Repo):
     def reorder(self, ordered_ids: Sequence[int]) -> None:
         for index, view_id in enumerate(ordered_ids):
             self._c.execute("UPDATE saved_views SET sort_order = ? WHERE id = ?", (index, view_id))
+
+
+# --------------------------------------------------------------------------- linkers & attachments
+
+
+class SqliteLinkerRepository(_Repo):
+    def add(self, linker: Linker) -> Linker:
+        created = _now()
+        try:
+            cur = self._c.execute(
+                "INSERT INTO linkers(name, description, color, enabled, sort_order, schema_version, "
+                "definition_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                (linker.name, linker.description, linker.color, int(linker.enabled), linker.sort_order,
+                 linker.schema_version, linker.definition_json, created, created),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError(f"a linker named {linker.name!r} already exists") from exc
+        linker.id = cur.lastrowid
+        linker.created_at = linker.updated_at = _from_iso(created)
+        return linker
+
+    def get(self, linker_id: int) -> Linker | None:
+        row = self._c.execute("SELECT * FROM linkers WHERE id = ?", (linker_id,)).fetchone()
+        return _linker(row) if row else None
+
+    def get_by_name(self, name: str) -> Linker | None:
+        row = self._c.execute("SELECT * FROM linkers WHERE name = ?", (name,)).fetchone()
+        return _linker(row) if row else None
+
+    def list_all(self) -> list[Linker]:
+        rows = self._c.execute("SELECT * FROM linkers ORDER BY sort_order, name COLLATE NOCASE").fetchall()
+        return [_linker(r) for r in rows]
+
+    def list_enabled(self) -> list[Linker]:
+        rows = self._c.execute(
+            "SELECT * FROM linkers WHERE enabled = 1 ORDER BY sort_order, name COLLATE NOCASE"
+        ).fetchall()
+        return [_linker(r) for r in rows]
+
+    def update(self, linker: Linker) -> None:
+        try:
+            self._c.execute(
+                "UPDATE linkers SET name=?, description=?, color=?, enabled=?, sort_order=?, "
+                "schema_version=?, definition_json=?, updated_at=? WHERE id=?",
+                (linker.name, linker.description, linker.color, int(linker.enabled), linker.sort_order,
+                 linker.schema_version, linker.definition_json, _now(), linker.id),
+            )
+        except sqlite3.IntegrityError as exc:
+            raise ConflictError(f"a linker named {linker.name!r} already exists") from exc
+
+    def delete(self, linker_id: int) -> None:
+        self._c.execute("DELETE FROM linkers WHERE id = ?", (linker_id,))   # cascades children
+
+    def reorder(self, ordered_ids: Sequence[int]) -> None:
+        for index, linker_id in enumerate(ordered_ids):
+            self._c.execute("UPDATE linkers SET sort_order = ? WHERE id = ?", (index, linker_id))
+
+
+class SqliteAttachmentRepository(_Repo):
+    def get(self, attachment_id: int) -> Attachment | None:
+        row = self._c.execute("SELECT * FROM asset_attachments WHERE id = ?", (attachment_id,)).fetchone()
+        return _attachment(row) if row else None
+
+    def list_for_asset(self, asset_id: int) -> list[Attachment]:
+        rows = self._c.execute(
+            "SELECT * FROM asset_attachments WHERE asset_id = ? "
+            "ORDER BY origin DESC, score DESC, path COLLATE NOCASE",
+            (asset_id,),
+        ).fetchall()
+        return [_attachment(r) for r in rows]
+
+    def list_for_linker(self, linker_id: int) -> list[Attachment]:
+        rows = self._c.execute(
+            "SELECT * FROM asset_attachments WHERE linker_id = ?", (linker_id,)
+        ).fetchall()
+        return [_attachment(r) for r in rows]
+
+    def counts_for_assets(self, asset_ids: Sequence[int]) -> dict[int, int]:
+        result: dict[int, int] = {aid: 0 for aid in asset_ids}
+        if not asset_ids:
+            return result
+        slots = ",".join("?" * len(asset_ids))
+        rows = self._c.execute(
+            f"SELECT asset_id AS aid, COUNT(DISTINCT path) AS n FROM asset_attachments "
+            f"WHERE asset_id IN ({slots}) AND status = 'linked' GROUP BY asset_id",
+            tuple(asset_ids),
+        ).fetchall()
+        for r in rows:
+            result[r["aid"]] = int(r["n"])
+        return result
+
+    def upsert(self, attachment: Attachment) -> Attachment:
+        created = _iso_or_none(attachment.created_at) or _now()
+        cur = self._c.execute(
+            "INSERT INTO asset_attachments(asset_id, linker_id, path, label, ext, score, matched_json, "
+            "status, origin, size, mtime_ns, created_at, last_verified_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(asset_id, linker_id, path) DO UPDATE SET "
+            "label=excluded.label, ext=excluded.ext, score=excluded.score, matched_json=excluded.matched_json, "
+            "status=excluded.status, origin=excluded.origin, size=excluded.size, mtime_ns=excluded.mtime_ns, "
+            "last_verified_at=excluded.last_verified_at",
+            (attachment.asset_id, attachment.linker_id, attachment.path, attachment.label, attachment.ext,
+             attachment.score, json.dumps(attachment.matched), attachment.status, attachment.origin,
+             attachment.size, attachment.mtime_ns, created, _now()),
+        )
+        if cur.lastrowid:
+            attachment.id = cur.lastrowid
+        return attachment
+
+    def delete(self, attachment_id: int) -> None:
+        self._c.execute("DELETE FROM asset_attachments WHERE id = ?", (attachment_id,))
+
+    def prune_auto(self, linker_id: int, keep: Iterable[tuple[int, str]]) -> int:
+        keep_set = set(keep)
+        rows = self._c.execute(
+            "SELECT id, asset_id, path FROM asset_attachments WHERE linker_id = ? AND origin = 'auto'",
+            (linker_id,),
+        ).fetchall()
+        removed = 0
+        for r in rows:
+            if (r["asset_id"], r["path"]) not in keep_set:
+                self._c.execute("DELETE FROM asset_attachments WHERE id = ?", (r["id"],))
+                removed += 1
+        return removed
+
+    def set_status(self, attachment_id: int, status: str) -> None:
+        self._c.execute(
+            "UPDATE asset_attachments SET status = ?, last_verified_at = ? WHERE id = ?",
+            (status, _now(), attachment_id),
+        )
+
+
+class SqliteAttachmentOverrideRepository(_Repo):
+    def set(self, override: AttachmentOverride) -> None:
+        self._c.execute(
+            "INSERT INTO attachment_overrides(asset_id, linker_id, path, decision, created_at) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(asset_id, linker_id, path) DO UPDATE SET decision=excluded.decision",
+            (override.asset_id, override.linker_id, override.path, override.decision, _now()),
+        )
+
+    def clear(self, asset_id: int, linker_id: int, path: str) -> None:
+        self._c.execute(
+            "DELETE FROM attachment_overrides WHERE asset_id=? AND linker_id=? AND path=?",
+            (asset_id, linker_id, path),
+        )
+
+    def list_for_linker(self, linker_id: int) -> list[AttachmentOverride]:
+        rows = self._c.execute(
+            "SELECT * FROM attachment_overrides WHERE linker_id = ?", (linker_id,)
+        ).fetchall()
+        return [_override(r) for r in rows]
+
+    def list_for_asset(self, asset_id: int) -> list[AttachmentOverride]:
+        rows = self._c.execute(
+            "SELECT * FROM attachment_overrides WHERE asset_id = ?", (asset_id,)
+        ).fetchall()
+        return [_override(r) for r in rows]
+
+
+class SqliteLinkerFileCacheStore(_Repo):
+    def get_all(self, linker_id: int) -> dict[str, tuple[int, int, str]]:
+        rows = self._c.execute(
+            "SELECT path, size, mtime_ns, fields_json FROM linker_file_cache WHERE linker_id = ?",
+            (linker_id,),
+        ).fetchall()
+        return {r["path"]: (r["size"], r["mtime_ns"], r["fields_json"]) for r in rows}
+
+    def put(self, linker_id: int, path: str, size: int, mtime_ns: int, fields_json: str) -> None:
+        self._c.execute(
+            "INSERT INTO linker_file_cache(linker_id, path, size, mtime_ns, fields_json) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(linker_id, path) DO UPDATE SET size=excluded.size, mtime_ns=excluded.mtime_ns, "
+            "fields_json=excluded.fields_json",
+            (linker_id, path, size, mtime_ns, fields_json),
+        )
+
+    def prune(self, linker_id: int, keep_paths: Iterable[str]) -> None:
+        keep = set(keep_paths)
+        rows = self._c.execute(
+            "SELECT path FROM linker_file_cache WHERE linker_id = ?", (linker_id,)
+        ).fetchall()
+        for r in rows:
+            if r["path"] not in keep:
+                self._c.execute(
+                    "DELETE FROM linker_file_cache WHERE linker_id = ? AND path = ?", (linker_id, r["path"])
+                )
+
+    def clear(self, linker_id: int) -> None:
+        self._c.execute("DELETE FROM linker_file_cache WHERE linker_id = ?", (linker_id,))
 
 
 # --------------------------------------------------------------------------- hash cache & meta

@@ -21,10 +21,11 @@ from pydantic import BaseModel, Field
 
 from clippycap.app.bootstrap import Application
 from clippycap.app.ffmpeg_service import FfmpegStatus
+from clippycap.app.linking.engine import EngineResult
 from clippycap.app.reference_service import ReferenceView
 from clippycap.app.services import AssetDetail, AssetSummary, NoteView
 from clippycap.app.update_service import ReleaseAsset, UpdateStatus
-from clippycap.core.entities import Asset, ReferenceType, Source, Tag, TagGroup
+from clippycap.core.entities import Asset, Attachment, Linker, ReferenceType, Source, Tag, TagGroup
 from clippycap.core.errors import ClippycapError, ConflictError, InvalidInputError, NotFoundError, UnsupportedError
 from clippycap.core.query import AssetFilter
 from clippycap.infra.config.schema import EditingConfig, PlayerConfig
@@ -63,6 +64,58 @@ def _tag_group_dict(group: TagGroup) -> dict[str, Any]:
         "id": group.id, "name": group.name, "color": group.color,
         "sort_order": group.sort_order, "has_page": group.has_page,
         "parent_id": group.parent_id, "notes": group.notes,
+    }
+
+
+def _linker_dict(linker: Linker) -> dict[str, Any]:
+    return {
+        "id": linker.id, "name": linker.name, "description": linker.description, "color": linker.color,
+        "enabled": linker.enabled, "sort_order": linker.sort_order,
+        "schema_version": linker.schema_version, "definition_json": linker.definition_json,
+        "created_at": _iso(linker.created_at), "updated_at": _iso(linker.updated_at),
+    }
+
+
+def _attachment_dict(att: Attachment) -> dict[str, Any]:
+    return {
+        "id": att.id, "asset_id": att.asset_id, "linker_id": att.linker_id, "path": att.path,
+        "label": att.label, "ext": att.ext, "score": att.score, "matched": att.matched,
+        "status": att.status, "origin": att.origin, "size": att.size,
+    }
+
+
+def _engine_result_dict(result: EngineResult) -> dict[str, Any]:
+    return {
+        "links": [
+            {"clip_id": lk.clip_id, "file_path": lk.file_path, "score": lk.score,
+             "origin": lk.origin, "reasons": lk.reasons}
+            for lk in result.links
+        ],
+        "ambiguous": {
+            str(cid): [{"file_path": c.file_path, "score": c.score} for c in choices]
+            for cid, choices in result.ambiguous.items()
+        },
+        "unmatched_clip_ids": result.unmatched_clip_ids,
+        "unused_files": result.unused_files,
+        "clip_errors": {str(k): v for k, v in result.clip_errors.items()},
+        "file_errors": result.file_errors,
+        "candidate_count": result.candidate_count,
+        "counts": {
+            "matched": len({lk.clip_id for lk in result.links}),
+            "links": len(result.links),
+            "ambiguous": len(result.ambiguous),
+            "unmatched": len(result.unmatched_clip_ids),
+            "unused": len(result.unused_files),
+        },
+    }
+
+
+def _preset_dict(preset: object) -> dict[str, Any]:
+    from clippycap.app.linking.presets import Preset  # noqa: PLC0415 -- local to keep the import surface small
+    assert isinstance(preset, Preset)
+    return {
+        "key": preset.key, "name": preset.name, "description": preset.description,
+        "color": preset.color, "definition_json": preset.definition.model_dump_json(),
     }
 
 
@@ -250,6 +303,37 @@ class BulkCategoriesBody(BaseModel):
     add: list[int] = Field(default_factory=list)
     remove: list[int] = Field(default_factory=list)
     replace_with: list[int] | None = None
+
+
+class LinkerBody(BaseModel):
+    name: str = Field(min_length=1)
+    definition_json: str = Field(min_length=2)
+    description: str = ""
+    color: str = ""
+    enabled: bool = False
+
+
+class EnabledBody(BaseModel):
+    enabled: bool
+
+
+class PreviewBody(BaseModel):
+    definition_json: str = Field(min_length=2)
+
+
+class OverrideBody(BaseModel):
+    linker_id: int
+    path: str = Field(min_length=1)
+    decision: str = "pin"           # pin | exclude
+
+
+class ClearOverrideBody(BaseModel):
+    linker_id: int
+    path: str = Field(min_length=1)
+
+
+class OpenWithBody(BaseModel):
+    action: str = Field(min_length=1)
 
 
 class NoteTagsBody(BaseModel):
@@ -878,6 +962,95 @@ def create_app(application: Application) -> FastAPI:  # noqa: PLR0915 -- a route
     @api.post("/api/saved-views/reorder", status_code=204)
     def reorder_saved_views(app: AppDep, body: IdsBody) -> Response:
         app.saved_views.reorder(body.ids)
+        return Response(status_code=204)
+
+    # ---- linkers (companion-file linking) --------------------------------
+
+    @api.get("/api/linkers")
+    def list_linkers(app: AppDep) -> list[dict[str, Any]]:
+        return [_linker_dict(lk) for lk in app.linkers.list_all()]
+
+    @api.get("/api/linkers/presets")
+    def linker_presets(app: AppDep) -> list[dict[str, Any]]:
+        return [_preset_dict(p) for p in app.linkers.presets()]
+
+    @api.post("/api/linkers", status_code=201)
+    def create_linker(app: AppDep, body: LinkerBody) -> dict[str, Any]:
+        return _linker_dict(app.linkers.create(
+            name=body.name, definition_json=body.definition_json, description=body.description,
+            color=body.color, enabled=body.enabled,
+        ))
+
+    @api.post("/api/linkers/preview")
+    def preview_linker(app: AppDep, body: PreviewBody) -> dict[str, Any]:
+        return _engine_result_dict(app.linkers.preview(body.definition_json))
+
+    @api.post("/api/linkers/run-all", status_code=202)
+    def run_all_linkers(app: AppDep) -> dict[str, str]:
+        return {"job_id": app.linkers.run_all_enabled()}
+
+    @api.post("/api/linkers/reorder", status_code=204)
+    def reorder_linkers(app: AppDep, body: IdsBody) -> Response:
+        app.linkers.reorder(body.ids)
+        return Response(status_code=204)
+
+    @api.get("/api/linkers/{linker_id}")
+    def get_linker(app: AppDep, linker_id: int) -> dict[str, Any]:
+        return _linker_dict(app.linkers.get(linker_id))
+
+    @api.put("/api/linkers/{linker_id}")
+    def update_linker(app: AppDep, linker_id: int, body: LinkerBody) -> dict[str, Any]:
+        return _linker_dict(app.linkers.update(
+            linker_id, name=body.name, definition_json=body.definition_json,
+            description=body.description, color=body.color, enabled=body.enabled,
+        ))
+
+    @api.delete("/api/linkers/{linker_id}", status_code=204)
+    def delete_linker(app: AppDep, linker_id: int) -> Response:
+        app.linkers.delete(linker_id)
+        return Response(status_code=204)
+
+    @api.post("/api/linkers/{linker_id}/enabled")
+    def set_linker_enabled(app: AppDep, linker_id: int, body: EnabledBody) -> dict[str, Any]:
+        return _linker_dict(app.linkers.set_enabled(linker_id, body.enabled))
+
+    @api.post("/api/linkers/{linker_id}/clone", status_code=201)
+    def clone_linker(app: AppDep, linker_id: int) -> dict[str, Any]:
+        return _linker_dict(app.linkers.clone(linker_id))
+
+    @api.post("/api/linkers/{linker_id}/run", status_code=202)
+    def run_linker(app: AppDep, linker_id: int) -> dict[str, str]:
+        return {"job_id": app.linkers.run(linker_id)}
+
+    @api.get("/api/assets/{asset_id}/attachments")
+    def asset_attachments(app: AppDep, asset_id: int) -> list[dict[str, Any]]:
+        return [_attachment_dict(a) for a in app.linkers.attachments_for_asset(asset_id)]
+
+    @api.post("/api/assets/{asset_id}/overrides", status_code=204)
+    def set_override(app: AppDep, asset_id: int, body: OverrideBody) -> Response:
+        app.linkers.set_override(
+            asset_id=asset_id, linker_id=body.linker_id, path=body.path, decision=body.decision
+        )
+        return Response(status_code=204)
+
+    @api.post("/api/assets/{asset_id}/overrides/clear", status_code=204)
+    def clear_override(app: AppDep, asset_id: int, body: ClearOverrideBody) -> Response:
+        app.linkers.clear_override(asset_id=asset_id, linker_id=body.linker_id, path=body.path)
+        return Response(status_code=204)
+
+    @api.post("/api/attachments/{attachment_id}/reveal", status_code=204)
+    def reveal_attachment(app: AppDep, attachment_id: int) -> Response:
+        app.linkers.reveal(attachment_id)
+        return Response(status_code=204)
+
+    @api.post("/api/attachments/{attachment_id}/open", status_code=204)
+    def open_attachment(app: AppDep, attachment_id: int) -> Response:
+        app.linkers.open_default(attachment_id)
+        return Response(status_code=204)
+
+    @api.post("/api/attachments/{attachment_id}/open-with", status_code=204)
+    def open_attachment_with(app: AppDep, attachment_id: int, body: OpenWithBody) -> Response:
+        app.linkers.open_with(attachment_id, body.action)
         return Response(status_code=204)
 
     # ---- config / plugins / health ---------------------------------------

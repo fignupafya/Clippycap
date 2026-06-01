@@ -145,3 +145,65 @@ class SavedView:
     sort_key: str
     sort_order: int = 0
     id: int | None = None
+
+
+@dataclass(slots=True)
+class Linker:
+    """A user-defined rule that auto-attaches companion files to assets (see LINKERS.md).
+
+    ``definition_json`` is the whole rule serialised (a
+    :class:`~clippycap.app.linking.types.LinkerDefinition`): the source/target scopes, how each side
+    is read into typed fields, the match predicates, the resolution policy, and the open-with
+    actions. It is a versioned JSON blob so the rule language can evolve and linkers export/import
+    as JSON. ``enabled`` is the main-menu toggle; a disabled linker keeps its rows but stops matching.
+    """
+
+    name: str                                # unique
+    definition_json: str
+    description: str = ""
+    color: str = ""                          # hex "#rrggbb" or "" for none
+    enabled: bool = False
+    sort_order: int = 0                      # display order / resolution priority
+    schema_version: int = 1
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    id: int | None = None
+
+
+@dataclass(slots=True)
+class Attachment:
+    """A resolved link from an asset to a companion file on disk (produced by a :class:`Linker`).
+
+    Identified by ``path`` (not a content hash -- companion files can be large and we don't read
+    them). ``matched_json`` snapshots the field values that justified the link, for the "why"
+    explanation. ``origin`` is ``"auto"`` for a rule-produced link or ``"manual"`` for a user pin.
+    ``status`` flips to ``"missing"`` when the file vanishes (never auto-deleted -- the drive may
+    just be unmounted)."""
+
+    asset_id: int
+    linker_id: int
+    path: str
+    label: str = ""
+    ext: str = ""                            # lowercase, no leading dot
+    score: float = 0.0
+    matched: dict[str, Any] = field(default_factory=dict)
+    status: str = "linked"                   # linked | missing
+    origin: str = "auto"                     # auto | manual
+    size: int | None = None
+    mtime_ns: int | None = None
+    created_at: datetime | None = None
+    last_verified_at: datetime | None = None
+    id: int | None = None
+
+
+@dataclass(slots=True)
+class AttachmentOverride:
+    """A manual decision that survives every re-run: ``"pin"`` force-links a file even if the rule
+    would not, ``"exclude"`` force-unlinks one the rule wrongly produced. Keyed by
+    ``(asset_id, linker_id, path)`` so the resolver can honour it forever."""
+
+    asset_id: int
+    linker_id: int
+    path: str
+    decision: str                            # pin | exclude
+    created_at: datetime | None = None

@@ -254,3 +254,11 @@ check_interval_hours = 24
 # On first run, offer to add these folders as sources (existing ones only; the user confirms).
 # "@videos" -> the OS "Videos" library folder.
 suggest_sources   = ["@videos"]
+
+[linkers]
+# Companion-file linkers attach files (demos, scripts, transcripts, RAWs, ...) to clips by a
+# user-defined rule. Each linker's whole rule lives in its own database row; these are just the
+# global switches. `enabled = false` turns the entire subsystem off.
+enabled       = true
+run_on_scan   = true     # re-run enabled linkers after a library scan finishes
+run_on_focus  = false    # re-run enabled linkers when the window regains focus (cheap re-sync)

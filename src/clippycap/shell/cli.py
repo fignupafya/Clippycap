@@ -392,6 +392,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # portable self-update so backups don't pile up over time.
     application.scans.upgrade_identity_format()
     application.scans.enrich_pending()
+    # Re-sync companion-file linkers (queues behind the enrichment pass, so it self-heals any clips
+    # that were waiting on metadata). A no-op when nothing is enabled.
+    if application.config.linkers.enabled:
+        application.linkers.run_all_enabled()
     cleanup_stale_backups()
     api = create_app(application)
     cfg = application.config
