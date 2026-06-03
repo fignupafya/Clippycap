@@ -26,6 +26,7 @@ from clippycap.app.services import AssetService, NoteService, TagGroupService, T
 from clippycap.app.source_service import SavedViewService, SourceService
 from clippycap.app.update_service import UpdateService
 from clippycap.core.entities import ReferenceType
+from clippycap.core.events import ScanCompleted
 from clippycap.infra.config import Config, ConfigHolder, load_config
 from clippycap.infra.config.loader import default_install_dir
 from clippycap.infra.db.database import SqliteDatabase
@@ -196,6 +197,17 @@ def build_application(
         config_holder=config_holder, database=database, data_dir=data_dir,
     )
     linker_service = LinkerService(database=database, jobs=jobs, runner=LinkerRunner(database))
+
+    # Auto-link after a library scan: when new clips stream in, re-run the enabled linkers so their
+    # companion files attach without the user lifting a finger (config-gated). The handler runs in the
+    # scan worker thread but only *submits* a job, so it returns at once and the linker run queues
+    # behind the scan. A failing handler can't break the scan (the bus swallows subscriber errors).
+    def _autolink_after_scan(_event: ScanCompleted) -> None:
+        linkers_cfg = config_holder.current.linkers
+        if linkers_cfg.enabled and linkers_cfg.run_on_scan:
+            linker_service.run_all_enabled()
+
+    event_bus.subscribe(ScanCompleted, _autolink_after_scan)
 
     return Application(
         config_holder=config_holder, ffmpeg_tools=ffmpeg_tools, database=database, event_bus=event_bus,

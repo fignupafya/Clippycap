@@ -198,9 +198,17 @@ def _dedupe_by_path(attachments: list[Attachment]) -> list[Attachment]:
 def _reveal_in_file_manager(path: str) -> None:
     p = Path(path)
     if sys.platform == "win32":
-        # /select, highlights the file in Explorer; falls back to opening the folder if it's gone.
-        target = str(p) if p.exists() else str(p.parent)
-        _spawn(["explorer", f"/select,{target}"], check=False)
+        # Explorer's /select needs the path QUOTED *inside* the argument: otherwise a space in the
+        # path makes it silently open the Documents folder instead of selecting the file. A Windows
+        # path can't contain a '"', so the quoting is injection-safe; this is one CreateProcess
+        # command line, not a shell (no cmd.exe). Falls back to opening the folder if the file is gone.
+        if p.exists() and '"' not in path:
+            try:
+                subprocess.Popen(f'explorer /select,"{path}"', shell=False)
+                return
+            except OSError as exc:
+                _log.warning("reveal failed for %r: %s", path, exc)
+        os.startfile(str(p if p.is_dir() else p.parent))
     elif sys.platform == "darwin":
         _spawn(["open", "-R", str(p)])
     else:
