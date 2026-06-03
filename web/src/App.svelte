@@ -377,6 +377,9 @@
     try {
       const r = await api.reconcile();
       if (r.changed) await loadAssets();          // refresh in place -- no scroll jump
+      // Optional: re-run companion-file linkers on focus, so files added to a target folder while
+      // the app was unfocused get attached. Off by default ([linkers].run_on_focus).
+      if (cfg?.linkers?.enabled && cfg.linkers.run_on_focus) { try { await api.runAllLinkers(); } catch { /* best-effort */ } }
     } catch { /* best-effort; a manual Scan always re-syncs */ }
     finally { reconciling = false; }
   }

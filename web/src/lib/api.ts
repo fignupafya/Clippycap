@@ -105,6 +105,7 @@ export interface UiConfig {
 export interface AppConfig {
   editing: EditingConfig; player: PlayerConfig; keybindings: Record<string, string>;
   ui: UiConfig;
+  linkers?: { enabled: boolean; run_on_scan: boolean; run_on_focus: boolean };
   [key: string]: unknown;
 }
 export interface FfmpegStatus {
