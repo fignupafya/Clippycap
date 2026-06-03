@@ -97,6 +97,7 @@ def _engine_result_dict(result: EngineResult) -> dict[str, Any]:
         },
         "unmatched_clip_ids": result.unmatched_clip_ids,
         "unused_files": result.unused_files,
+        "mandatory_unmatched_clip_ids": result.mandatory_unmatched_clip_ids,
         "clip_errors": {str(k): v for k, v in result.clip_errors.items()},
         "file_errors": result.file_errors,
         "candidate_count": result.candidate_count,
@@ -106,6 +107,7 @@ def _engine_result_dict(result: EngineResult) -> dict[str, Any]:
             "ambiguous": len(result.ambiguous),
             "unmatched": len(result.unmatched_clip_ids),
             "unused": len(result.unused_files),
+            "mandatory_unmatched": len(result.mandatory_unmatched_clip_ids),
         },
     }
 

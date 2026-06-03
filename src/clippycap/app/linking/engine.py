@@ -55,6 +55,9 @@ class EngineResult:
     clip_errors: dict[int, dict[str, str]] = field(default_factory=dict)
     file_errors: dict[str, dict[str, str]] = field(default_factory=dict)
     candidate_count: int = 0
+    # clips that got fewer than the required minimum links (resolve.per_clip_min >= 1) -- a "mandatory"
+    # rule treats these as errors, not silent misses.
+    mandatory_unmatched_clip_ids: list[int] = field(default_factory=list)
 
 
 def _group_value(ref: Ref, clip_vals: dict[str, Any], file_vals: dict[str, Any]) -> Any:
@@ -89,6 +92,8 @@ def run_match(
     for clip in clip_list:
         cvals = clip_recs[clip.asset_id]
         for fitem in file_list:
+            if clip.ctx.path and fitem.path == clip.ctx.path:
+                continue                                  # never link a clip to its OWN file (self-link)
             fvals = file_recs[fitem.path]
             cand_score = evaluate_match(defn.match, cvals, fvals)
             if cand_score is None:
@@ -110,6 +115,13 @@ def run_match(
     ]
 
     _fill_buckets(result, clip_list, file_list, candidates, out.links, set(out.ambiguous_clip_ids))
+    if defn.resolve.per_clip_min >= 1:                     # a "mandatory" rule: too-few links is an error
+        per_clip: dict[int, int] = {}
+        for link in out.links:
+            per_clip[link.clip_id] = per_clip.get(link.clip_id, 0) + 1
+        result.mandatory_unmatched_clip_ids = [
+            c.asset_id for c in clip_list if per_clip.get(c.asset_id, 0) < defn.resolve.per_clip_min
+        ]
     return result
 
 

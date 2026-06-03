@@ -128,7 +128,10 @@ def cast_value(value: Any, field_type: FieldType, *, date_format: str | None = N
         return None
     casters: dict[FieldType, Any] = {
         "string": lambda v: v if isinstance(v, str) else str(v),
-        "int": lambda v: round(to_number(v)),
+        # parse a pure-integer string exactly (no float precision loss for big sequence keys);
+        # fall back to rounding a numeric/float value.
+        "int": lambda v: int(v.strip()) if isinstance(v, str) and v.strip().lstrip("+-").isdigit()
+                         else round(to_number(v)),
         "float": to_number,
         "bool": _to_bool,
         "datetime": lambda v: to_epoch(v, date_format=date_format, tz=tz),

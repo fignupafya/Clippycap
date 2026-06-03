@@ -53,6 +53,8 @@ def _norm(value: Any, *, ci: bool) -> str:
 
 
 def _eq(left: Any, right: Any, *, ci: bool) -> bool:
+    if isinstance(left, int) and isinstance(right, int) and not isinstance(left, bool) and not isinstance(right, bool):
+        return left == right                          # exact -- no float precision loss for big keys
     ln, rn = _num(left), _num(right)
     if ln is not None and rn is not None:
         return abs(ln - rn) < _EPS

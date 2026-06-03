@@ -39,6 +39,7 @@ class RunSummary:
     unmatched: int = 0
     unused: int = 0
     waiting_on_metadata: int = 0
+    unavailable: bool = False     # a configured target directory was missing -> links left untouched
 
 
 @dataclass(slots=True)
@@ -120,11 +121,15 @@ class LinkerRunner:
 
         summary = RunSummary(linker_id=linker_id)
         clip_items, summary.waiting_on_metadata = _build_clip_items(defn, clips_raw)
-        file_items = self._gather_files(defn)
+        file_items, available = self._gather_files(defn)
+        summary.unavailable = not available
         summary.clips, summary.files = len(clip_items), len(file_items)
 
         result = run_match(defn, clip_items, file_items, pins=pins, excludes=excludes, existing=existing)
-        self._sync(linker_id, result, summary)
+        # If a configured target folder is missing (unmounted drive, deleted folder), DON'T prune --
+        # the files only "vanished" transiently; wiping the user's links would be data loss. We still
+        # upsert any links found in the folders that ARE present.
+        self._sync(linker_id, result, summary, prune=available)
         summary.ambiguous = len(result.ambiguous)
         summary.unmatched = len(result.unmatched_clip_ids)
         summary.unused = len(result.unused_files)
@@ -148,8 +153,8 @@ class LinkerRunner:
                     asset.id, dict(asset.metadata), present[0].path if present else None, asset.metadata_pending
                 ))
         clip_items, _ = _build_clip_items(defn, clips_raw)
-        file_items = self._gather_files(defn)[:limit_files]
-        return run_match(defn, clip_items, file_items)
+        file_items, _ = self._gather_files(defn)
+        return run_match(defn, clip_items, file_items[:limit_files])
 
     def run_all_enabled(self) -> list[RunSummary]:
         with self._db.transaction() as uow:
@@ -184,9 +189,13 @@ class LinkerRunner:
             existing = [(a.asset_id, a.path) for a in uow.attachments.list_for_linker(linker_id)]
         return defn, clips_raw, pins, excludes, existing
 
-    def _gather_files(self, defn: LinkerDefinition) -> list[FileItem]:
+    def _gather_files(self, defn: LinkerDefinition) -> tuple[list[FileItem], bool]:
+        """Walk the target directories. Returns the files AND whether every configured directory was
+        actually present -- a missing one (unmounted drive / deleted folder) makes the run
+        ``unavailable`` so the caller skips pruning rather than wiping links on a transient failure."""
         target = defn.target
         exts = {e.lower().lstrip(".") for e in target.extensions}
+        available = all(Path(d).is_dir() for d in target.directories)
         items: list[FileItem] = []
         folder_order: dict[str, list[str]] = {}
         for directory in target.directories:
@@ -208,11 +217,11 @@ class LinkerRunner:
                 if not _size_ok(ctx.size, target.min_size, target.max_size):
                     continue
                 items.append(FileItem(path=p, ctx=ctx))
-        return items
+        return items, available
 
     # ---- sync (write) ---------------------------------------------------
 
-    def _sync(self, linker_id: int, result: EngineResult, summary: RunSummary) -> None:
+    def _sync(self, linker_id: int, result: EngineResult, summary: RunSummary, *, prune: bool) -> None:
         with self._db.transaction() as uow:
             keep: set[tuple[int, str]] = set()
             for link in result.links:
@@ -236,7 +245,8 @@ class LinkerRunner:
                 ))
                 keep.add((link.clip_id, link.file_path))
                 summary.written += 1
-            summary.removed = uow.attachments.prune_auto(linker_id, keep)
+            if prune:
+                summary.removed = uow.attachments.prune_auto(linker_id, keep)
             uow.commit()
 
 
