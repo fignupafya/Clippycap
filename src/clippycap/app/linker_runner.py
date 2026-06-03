@@ -129,7 +129,7 @@ class LinkerRunner:
         # If a configured target folder is missing (unmounted drive, deleted folder), DON'T prune --
         # the files only "vanished" transiently; wiping the user's links would be data loss. We still
         # upsert any links found in the folders that ARE present.
-        self._sync(linker_id, result, summary, prune=available)
+        self._sync(linker_id, result, summary, prune=available, label_template=defn.label_template)
         summary.ambiguous = len(result.ambiguous)
         summary.unmatched = len(result.unmatched_clip_ids)
         summary.unused = len(result.unused_files)
@@ -221,7 +221,9 @@ class LinkerRunner:
 
     # ---- sync (write) ---------------------------------------------------
 
-    def _sync(self, linker_id: int, result: EngineResult, summary: RunSummary, *, prune: bool) -> None:
+    def _sync(
+        self, linker_id: int, result: EngineResult, summary: RunSummary, *, prune: bool, label_template: str,
+    ) -> None:
         with self._db.transaction() as uow:
             keep: set[tuple[int, str]] = set()
             for link in result.links:
@@ -238,7 +240,7 @@ class LinkerRunner:
                         exists = False
                 uow.attachments.upsert(Attachment(
                     asset_id=link.clip_id, linker_id=linker_id, path=link.file_path,
-                    label=path.name, ext=path.suffix.lower().lstrip("."),
+                    label=_render_label(label_template, path), ext=path.suffix.lower().lstrip("."),
                     score=link.score, matched={"why": link.reasons},
                     status="linked" if exists else "missing", origin=link.origin,
                     size=size, mtime_ns=mtime_ns,
@@ -248,6 +250,14 @@ class LinkerRunner:
             if prune:
                 summary.removed = uow.attachments.prune_auto(linker_id, keep)
             uow.commit()
+
+
+def _render_label(template: str, path: Path) -> str:
+    """The attachment's display label from the linker's ``label_template`` (``%name%`` / ``%stem%`` /
+    ``%ext%``). Defaults to the file name; an empty/whitespace result falls back to it too."""
+    label = (template.replace("%name%", path.name).replace("%stem%", path.stem)
+             .replace("%ext%", path.suffix.lstrip(".")))
+    return label.strip() or path.name
 
 
 def _size_ok(size: int | None, lo: int | None, hi: int | None) -> bool:

@@ -183,7 +183,7 @@ class ResolveSpec(_Model):
     quota: int | None = None                 # "quota" strategy: keep only the best N overall
     relative_threshold: float | None = None  # keep candidates within this of the clip's best score
     absolute_floor: float = 0.0              # ...but never below this absolute score
-    contested: Literal["drop", "cascade", "flag"] = "flag"   # a capped file wanted by several clips
+    contested: Literal["drop", "cascade", "flag"] = "cascade"   # a capped file wanted by several clips
     ambiguity_margin: float = 0.0            # top-2 within this => flag as "needs you"
     tiebreak: list[TiebreakKey] = Field(default_factory=_default_tiebreak)
     one_per_group: Ref | None = None         # at most one match per value of this field

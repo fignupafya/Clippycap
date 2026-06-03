@@ -148,9 +148,30 @@ def resolve(
     chosen = _select(cands, spec, clip_used=clip_used, file_used=file_used, existing=existing_set)
     if spec.one_per_group is not None:
         chosen = _one_per_group(chosen)
+    chosen = _apply_contested(chosen, cands, spec, ambiguous)
 
     links = forced + [ResolvedLink(clip_id=c.clip_id, file_path=c.file_path, score=c.score) for c in chosen]
     return ResolveOutput(links=links, ambiguous_clip_ids=sorted(ambiguous))
+
+
+def _apply_contested(
+    chosen: list[Candidate], cands: list[Candidate], spec: ResolveSpec, ambiguous: set[int],
+) -> list[Candidate]:
+    """Handle a capped file wanted by several clips. ``cascade`` (default) lets a bumped clip keep the
+    next-best file it cascaded to -- which is exactly what greedy already produced. ``drop`` removes
+    those cascaded links (the clip gets nothing); ``flag`` also marks the clip "needs you". Only
+    relevant when a per-file cap can create contention, and not for the optimal ``best_overall``."""
+    if spec.contested == "cascade" or spec.per_file_max is None or spec.strategy == "best_overall":
+        return chosen
+    best_file: dict[int, str] = {}                       # each clip's single best candidate (cands is sorted)
+    for c in cands:
+        best_file.setdefault(c.clip_id, c.file_path)
+    bumped = {c.clip_id for c in chosen if best_file.get(c.clip_id) != c.file_path}
+    if not bumped:
+        return chosen
+    if spec.contested == "flag":
+        ambiguous |= bumped
+    return [c for c in chosen if c.clip_id not in bumped]
 
 
 def _select(
